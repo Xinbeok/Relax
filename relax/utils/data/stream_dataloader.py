@@ -605,10 +605,14 @@ def _encode_multimodal_inputs(mm_list):
     return spec, tensors
 
 
-def _broadcast_multimodal_inputs(spec, send_tensors, is_src, cuda_dev, broadcast_pp):
-    """Reconstruct ``multimodal_train_inputs`` on every rank by streaming the
-    raw tensors via NCCL (zero pickle) instead of through
-    ``broadcast_object_list``."""
+def _broadcast_multimodal_inputs(
+    spec, send_tensors, is_src, cuda_dev, broadcast_pp, *, first_stage_pixels: bool = False
+):
+    """Stream multimodal tensors via NCCL, optionally keeping pixels on PP0.
+
+    Grid metadata still reaches every stage: Qwen VL stages compute MRoPE
+    locally even when they do not contain the vision encoder.
+    """
     if spec is None:
         return None
 
@@ -620,11 +624,22 @@ def _broadcast_multimodal_inputs(spec, send_tensors, is_src, cuda_dev, broadcast
             continue
         sample: Dict[str, Any] = {}
         for key, enc in entry.items():
+            pixel_only = first_stage_pixels and key in ("pixel_values", "pixel_values_videos")
+            if pixel_only and mpu.get_pipeline_model_parallel_rank() != 0:
+                if enc["t"] == "tensor":
+                    idx += 1
+                elif enc["t"] == "list":
+                    idx += len(enc["items"])
+                continue
+            # CP/TP groups are contained within one physical PP stage, so all
+            # their members take the same branch. Pixels must never enter a
+            # PP collective while the other stages skip receiving them.
+            tensor_broadcast_pp = broadcast_pp and not pixel_only
             if enc["t"] == "tensor":
                 src_t = send_tensors[idx] if is_src else None
                 idx += 1
                 sample[key] = _bcast_known_tensor(
-                    src_t, is_src, enc["dtype"], enc["shape"], cuda_dev, broadcast_pp
+                    src_t, is_src, enc["dtype"], enc["shape"], cuda_dev, tensor_broadcast_pp
                 ).cpu()
             elif enc["t"] == "list":
                 items: List[Any] = []
@@ -632,7 +647,9 @@ def _broadcast_multimodal_inputs(spec, send_tensors, is_src, cuda_dev, broadcast
                     src_t = send_tensors[idx] if is_src else None
                     idx += 1
                     items.append(
-                        _bcast_known_tensor(src_t, is_src, sub["dtype"], sub["shape"], cuda_dev, broadcast_pp).cpu()
+                        _bcast_known_tensor(
+                            src_t, is_src, sub["dtype"], sub["shape"], cuda_dev, tensor_broadcast_pp
+                        ).cpu()
                     )
                 sample[key] = items
             else:  # raw
@@ -922,10 +939,31 @@ def get_data_from_transfer_queue(
             del td["multimodal_train_inputs"]
             rollout_data[0] = td
 
-    # Carry the (tiny) multimodal spec alongside the payload so every rank
-    # learns the dtype/shape of each tensor it is about to receive via NCCL.
-    # In per_rank_fetch mode this is None (each rank reconstructs locally).
-    rollout_data.append(mm_spec)
+    first_stage_pixels = False
+    if (
+        has_multimodal
+        and should_fetch
+        and broadcast_pp
+        and not per_rank_fetch
+        and getattr(args, "colocate", False)
+        and not getattr(args, "fully_async", False)
+        and getattr(args, "megatron_to_hf_mode", None) == "bridge"
+        and not getattr(args, "custom_model_provider_path", None)
+    ):
+        from relax.utils.misc import get_hf_config
+
+        # Only standard Qwen VL bridge providers consume pixels exclusively
+        # in PP0. Unknown/custom models retain the existing broadcast path.
+        try:
+            model_type = get_hf_config(args.hf_checkpoint).model_type
+        except (OSError, ValueError, ImportError):
+            model_type = None
+        first_stage_pixels = model_type in ("qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe")
+
+    # Carry the tiny spec and the source's routing decision through the existing
+    # metadata broadcast. A rank-local config failure must not change which
+    # collectives that rank enters. Per-rank fetch reconstructs inputs locally.
+    rollout_data.append((mm_spec, first_stage_pixels))
     if has_indexer_topk:
         rollout_data.append(indexer_topk_extract_error)
 
@@ -970,7 +1008,8 @@ def get_data_from_transfer_queue(
     # Unpack the broadcasted metadata and surface extraction failures on every
     # rank only after the object collective has completed.
     indexer_topk_extract_error = rollout_data[3] if has_indexer_topk else None
-    rollout_data, batch_meta, mm_spec = rollout_data[0], rollout_data[1], rollout_data[2]
+    mm_spec, first_stage_pixels = rollout_data[2]
+    rollout_data, batch_meta = rollout_data[0], rollout_data[1]
 
     if indexer_topk_extract_error is not None:
         raise RuntimeError(f"Unable to transfer rollout indexer replay: {indexer_topk_extract_error}")
@@ -982,7 +1021,14 @@ def get_data_from_transfer_queue(
     mm_inputs = None
     if has_multimodal:
         with timer("tgd_bcast_mm"):
-            mm_inputs = _broadcast_multimodal_inputs(mm_spec, mm_send_tensors, should_fetch, cuda_dev, broadcast_pp)
+            mm_inputs = _broadcast_multimodal_inputs(
+                mm_spec,
+                mm_send_tensors,
+                should_fetch,
+                cuda_dev,
+                broadcast_pp,
+                first_stage_pixels=first_stage_pixels,
+            )
 
     # --- Broadcast routed_experts tensors via efficient dist.broadcast ---
     # Skipped entirely in per_rank_fetch mode: each rank already received the
