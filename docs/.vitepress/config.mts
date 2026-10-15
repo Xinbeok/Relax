@@ -270,6 +270,7 @@ export default defineConfig({
                 { text: 'Dataset Design', link: '/en/guide/dataset-design' },
                 { text: 'Distributed Checkpoint', link: '/en/guide/distributed-checkpoint' },
                 { text: 'Health Check Manager', link: '/en/guide/health-check-manager' },
+                { text: 'Fault Event History', link: '/en/guide/fault-events' },
               ],
             },
             {
@@ -403,6 +404,7 @@ export default defineConfig({
                 { text: '数据集设计', link: '/zh/guide/dataset-design' },
                 { text: 'Distributed Checkpoint', link: '/zh/guide/distributed-checkpoint' },
                 { text: '健康检查管理器', link: '/zh/guide/health-check-manager' },
+                { text: '故障事件历史', link: '/zh/guide/fault-events' },
               ],
             },
             {

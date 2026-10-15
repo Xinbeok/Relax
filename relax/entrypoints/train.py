@@ -33,6 +33,7 @@ logger = get_logger(__name__)
 _ctrl: Controller | None = None
 _shutdown_done = False
 _kernel_cache_heartbeat = None
+_fault_runtime = None
 _SHUTDOWN_TIMEOUT_SEC = 60
 _NORMAL_SHUTDOWN_TIMEOUT_SEC = 1800
 
@@ -75,6 +76,16 @@ def _graceful_shutdown(sig=None, frame=None, exit_code: int | None = None):
         sig_name = signal.Signals(sig).name if sig else "atexit"
         logger.info(f"Graceful shutdown triggered ({sig_name}) — cleaning up SGLang engines...")
 
+        fault_runtime = globals().get("_fault_runtime")
+        if fault_runtime is not None:
+            try:
+                fault_runtime.close()
+            except Exception:
+                try:
+                    logger.warning("Fault event runtime shutdown unavailable")
+                except Exception:
+                    pass
+
         # Detached cache agents are outside the Ray Job's process tree. Notify them
         # first so a short Ray Job SIGTERM grace period cannot prevent publishing;
         # the normal path waits for a final snapshot after Serve stops train actors.
@@ -111,7 +122,7 @@ def _graceful_shutdown(sig=None, frame=None, exit_code: int | None = None):
 
 
 def main(args):
-    global _ctrl, _kernel_cache_heartbeat
+    global _ctrl, _fault_runtime, _kernel_cache_heartbeat
 
     # Startup failures need the same cleanup as failures in the training loop.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
@@ -119,6 +130,21 @@ def main(args):
     atexit.register(_graceful_shutdown)
 
     try:
+        if getattr(args, "fault_events_enabled", False):
+            try:
+                from relax.utils.fault_events.runtime import start_fault_events
+
+                _fault_runtime = start_fault_events(
+                    enabled=True,
+                    health_enabled=getattr(args, "use_health_check", False),
+                    port=getattr(args, "fault_events_port", 0),
+                )
+            except Exception:
+                try:
+                    logger.warning("Fault event runtime unavailable")
+                except Exception:
+                    pass
+
         # Load runtime_env from config so we can both pass it to ray.init and
         # explicitly to the Serve deployment. Ensure it's available even if Ray
         # is already initialized.

@@ -83,6 +83,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _fault_events_port(value: str) -> int:
+    parsed = int(value)
+    if not 0 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("expected a port from 0 to 65535")
+    return parsed
+
+
 def reset_arg(parser, name, **kwargs):
     """Reset the default value of a Megatron argument.
 
@@ -1101,6 +1108,18 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Whether to enable the global health check system. "
                 "When enabled, the Controller's HealthManager monitors all services "
                 "and triggers automatic restarts (in-place or global) on failure.",
+            )
+            parser.add_argument(
+                "--fault-events-enabled",
+                action="store_true",
+                default=False,
+                help="Record bounded in-memory fault events in the driver. Requires --use-health-check.",
+            )
+            parser.add_argument(
+                "--fault-events-port",
+                type=_fault_events_port,
+                default=0,
+                help="Loopback fault event query port (0-65535); 0 selects an available port.",
             )
             parser.add_argument(
                 "--max-global-restart",
