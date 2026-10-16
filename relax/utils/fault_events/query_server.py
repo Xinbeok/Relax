@@ -150,8 +150,14 @@ class _BoundedQuery:
                 raise ValueError("INVALID_QUERY")
         if re.search(rb"%(?![0-9a-fA-F]{2})", query):
             raise ValueError("INVALID_QUERY")
-        pairs = parse_qsl(
-            query.decode("ascii"), keep_blank_values=True, strict_parsing=True, errors="strict", max_num_fields=4
+        # Python 3.10's strict parser rejects an empty string, but omitting
+        # optional filters is a valid request for both endpoints.
+        pairs = (
+            parse_qsl(
+                query.decode("ascii"), keep_blank_values=True, strict_parsing=True, errors="strict", max_num_fields=4
+            )
+            if query
+            else []
         )
         params = dict(pairs)
         allowed = {"role", "fault_id", "limit", "cursor"} if scope["path"] == _EVENTS_PATH else set()
