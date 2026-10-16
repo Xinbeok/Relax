@@ -6,6 +6,8 @@ This first implementation batch provides the event model, storage, asynchronous 
 
 ## Enable the query endpoint
 
+The HTTP endpoint requires Uvicorn 0.36.0 or newer, as declared in `requirements.txt`. Earlier versions cannot load the custom event loop used for connection deadlines. The validated environment uses Uvicorn 0.54.0.
+
 Add `--use-health-check --fault-events-enabled` to your existing training command. Both flags are required. The feature is off by default; requesting fault history without health checks prints a fixed warning and leaves collection disabled.
 
 The driver logs the query URL and `run_id` after HTTP startup succeeds. `--fault-events-port` accepts 0–65535; the default 0 selects an available port. The endpoint binds only `127.0.0.1`. If the port is occupied or HTTP startup fails, in-memory recording remains available and training follows its existing path. A pure HTTP failure does not imply that history was lost.
