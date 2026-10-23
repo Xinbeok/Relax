@@ -30,12 +30,15 @@ def train_loader(monkeypatch):
     monkeypatch.delenv("RELAX_KERNEL_CACHE_DIR", raising=False)
     monkeypatch.setattr(relax.utils, "try_import_telemetry_hook", lambda: None)
 
-    def load(*, fail_at=None, on_train=None):
+    def load(*, fail_at=None, on_train=None, metrics_enabled=False):
         events, timers = [], []
         initialized = False
         serve = ModuleType("ray.serve")
         serve.start = lambda **_kwargs: events.append("serve_start")
         serve.shutdown = lambda: events.append("serve_shutdown")
+        serve.get_app_handle = Mock()
+        finish_tracking = serve.get_app_handle.return_value.finish_tracking.remote.return_value.result
+        finish_tracking.side_effect = lambda **_kwargs: events.append("finish_tracking") or {"status": "success"}
         ray = ModuleType("ray")
         ray.serve = serve
 
@@ -58,6 +61,7 @@ def train_loader(monkeypatch):
                 events.append("controller_init")
                 assert all(not isinstance(value, runtime_module.FaultEventRuntime) for value in vars(config).values())
                 self.config, self.runtime_env = config, runtime_env
+                self._metrics_service_enabled = metrics_enabled
                 if fail_at == "startup":
                     raise RuntimeError("controller startup failed")
 
@@ -144,7 +148,7 @@ def train_loader(monkeypatch):
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("fail_at", [None, "tracking", "startup", "training"])
 def test_train_runtime_preserves_success_and_failure_cleanup(train_loader, monkeypatch, enabled, fail_at):
-    module, events, timers = train_loader(fail_at=fail_at)
+    module, events, timers = train_loader(fail_at=fail_at, metrics_enabled=True)
     original_factory = runtime_module.start_fault_events
 
     def factory(**kwargs):
@@ -173,6 +177,10 @@ def test_train_runtime_preserves_success_and_failure_cleanup(train_loader, monke
     assert events[-3:] == ["serve_shutdown", "ray_shutdown", ("exit", expected)]
     assert events.count("controller_shutdown") == int(fail_at != "tracking")
     assert events.count("training_loop") == int(fail_at not in ("tracking", "startup"))
+    assert module._training_completed is (fail_at is None)
+    assert events.count("finish_tracking") == int(fail_at is None)
+    if fail_at is None:
+        assert events.index("controller_shutdown") < events.index("finish_tracking") < events.index("serve_shutdown")
     assert (module._fault_runtime is not None) is enabled
     assert set(vars(args)) == {"fault_events_enabled", "use_health_check", "fault_events_port"}
     if enabled:
@@ -262,7 +270,10 @@ def test_train_signal_cleanup_isolates_observer_close_and_preserves_exit(train_l
         raise OSError("private failure text")
 
     module._fault_runtime = SimpleNamespace(close=fail_close)
-    module._ctrl = SimpleNamespace(shutdown=lambda: events.append("controller_shutdown"))
+    module._ctrl = SimpleNamespace(
+        shutdown=lambda: events.append("controller_shutdown"), _metrics_service_enabled=True
+    )
+    module._training_completed = True
     module.ray.is_initialized = lambda: True
     with pytest.raises(SystemExit) as exc:
         module._graceful_shutdown(sig=signal.SIGTERM)
@@ -270,6 +281,7 @@ def test_train_signal_cleanup_isolates_observer_close_and_preserves_exit(train_l
     assert events == ["fault_close", "controller_shutdown", "serve_shutdown", "ray_shutdown", ("exit", 143)]
     assert timers == [("start", 60, (143,)), ("cancel", 60, (143,))]
     module.logger.warning.assert_called_once_with("Fault event runtime shutdown unavailable")
+    module.serve.get_app_handle.assert_not_called()
     with pytest.raises(SystemExit) as exc:
         module._graceful_shutdown(exit_code=0)
     assert exc.value.code == 0
@@ -303,6 +315,33 @@ def test_fault_event_cli_is_opt_in_with_ephemeral_port(fault_parser):
     assert args.fault_events_enabled is False
     assert args.fault_events_port == 0
     assert args.use_health_check is False
+
+
+def test_fault_event_cli_preserves_upstream_training_options(fault_parser):
+    args = fault_parser.parse_args(
+        [
+            "--fault-events-enabled",
+            "--use-health-check",
+            "--fault-events-port",
+            "65535",
+            "--qsa-indexer-loss-coeff",
+            "0.125",
+            "--tq-rdma-mode",
+            "auto",
+            "--sft-wholepack",
+            "--sft-packing-strategy",
+            "binpack",
+            "--sft-cpt-template",
+            "multimodal",
+        ]
+    )
+    assert args.fault_events_enabled and args.use_health_check
+    assert args.fault_events_port == 65535
+    assert args.qsa_indexer_loss_coeff == 0.125
+    assert args.tq_rdma_mode == "auto"
+    assert args.sft_wholepack
+    assert args.sft_packing_strategy == "binpack"
+    assert args.sft_cpt_template == "multimodal"
 
 
 @pytest.mark.parametrize("port", [0, 1, 65535])
