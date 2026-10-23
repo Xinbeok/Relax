@@ -778,32 +778,82 @@ class SGLangEngine(RayActor):
         )
 
     def get_expert_weight_sync_layout(self) -> dict:
-        """Return resolved layout settings for opt-in colocated expert
-        routing."""
+        """Return resolved layout settings for opt-in colocated expert routing
+        and direct BF16 loading."""
         from relax.utils.misc import get_hf_config
 
         if self.node_rank != 0 or self.worker_type != "regular":
             raise ValueError("Expert routing requires a regular node-0 rollout engine")
-        response = requests.get(f"http://{self.server_host}:{self.server_port}/server_info", timeout=30)
-        response.raise_for_status()
-        info = response.json()
+        for _ in range(2):
+            response = requests.get(f"http://{self.server_host}:{self.server_port}/server_info", timeout=30)
+            response.raise_for_status()
+            info = response.json()
+            # /server_info can time out fetching scheduler state while still
+            # returning HTTP 200. Retry once before rejecting an unknown auto layout.
+            if info.get("internal_states") or info.get("moe_runner_backend") != "auto":
+                break
         keys = (
+            "model_path",
+            "device",
             "tp_size",
             "ep_size",
             "pp_size",
             "moe_dp_size",
+            "dwdp_size",
             "enable_eplb",
             "ep_num_redundant_experts",
             "init_expert_location",
             "ep_join_mode",
+            "elastic_ep_backend",
             "speculative_algorithm",
             "moe_runner_backend",
+            "moe_a2a_backend",
             "json_model_override_args",
+            "dtype",
+            "quantization",
+            "enable_lora",
+            "disable_shared_experts_fusion",
+            "enforce_shared_experts_fusion",
+            "kt_weight_path",
+            "custom_weight_loader",
         )
         layout = {key: info[key] for key in keys if key in info}
-        config = get_hf_config(info["model_path"])
+        # Scheduler-side load-time overrides may differ from the HTTP process's
+        # startup config. Never infer the native layout from a stale "auto".
+        states = info.get("internal_states") or []
+        if states:
+            layouts = [{**layout, **{key: state[key] for key in keys if key in state}} for state in states]
+            if any(candidate != layouts[0] for candidate in layouts[1:]):
+                raise ValueError("Rollout schedulers disagree on the expert weight layout")
+            layout = layouts[0]
+        # ROCm also reports device="cuda". The local platform probe only describes
+        # receivers spawned here, not an externally managed HTTP engine.
+        layout["is_cuda"] = (
+            getattr(self, "process", None) is not None
+            and layout.get("device") == "cuda"
+            and device_utils.get_accelerator_type() == device_utils.AcceleratorType.CUDA
+        )
+        config = get_hf_config(layout["model_path"])
         text_config = getattr(config, "text_config", None) or config
-        layout["num_experts"] = getattr(text_config, "num_experts", None)
+        if "dtype" in layout:
+            from sglang.srt.configs.model_config import _get_and_verify_dtype
+
+            layout["dtype"] = str(_get_and_verify_dtype(text_config, layout["dtype"])).removeprefix("torch.")
+        if (
+            states
+            and all("moe_runner_backend" in state for state in states)
+            and layout.get("moe_runner_backend") == "auto"
+            and layout["is_cuda"]
+        ):
+            # Unquantized CUDA FusedMoE uses the standard Triton layout for auto.
+            # Quantization, remapping and fused shared experts are still checked
+            # by DirectExpertLayout; this does not change the engine's settings.
+            layout["moe_runner_backend"] = "triton"
+        layout["num_experts"] = getattr(text_config, "num_experts", None) or getattr(
+            text_config, "n_routed_experts", None
+        )
+        for key in ("hidden_size", "moe_intermediate_size", "quantization_config"):
+            layout[key] = getattr(text_config, key, None)
         return layout
 
     def load_lora_adapter_from_tensors(
@@ -2072,6 +2122,25 @@ def _compute_server_args(
                 logger.info(f"sglang_overrides: overriding {key}={kwargs[key]} -> {value} (rank={rank})")
             kwargs[key] = value
             unused_keys.discard(key)
+
+    # Repeated policy updates benefit from keeping shared and routed experts
+    # separate. Explicit per-engine settings or enforced fusion take precedence.
+    if (
+        "disable_shared_experts_fusion" in server_arg_field_names
+        and "disable_shared_experts_fusion" not in (sglang_overrides or {})
+        and not kwargs.get("enforce_shared_experts_fusion", False)
+    ):
+        kwargs["disable_shared_experts_fusion"] = True
+
+    if "custom_weight_loader" in server_arg_field_names:
+        from relax.backends.sglang.weight_loader import EXPERT_SLICE_LOADER
+
+        # Register alongside user loaders. The sender negotiates this exact
+        # capability from server_info before emitting partial native tensors.
+        loaders = list(kwargs.get("custom_weight_loader") or [])
+        if EXPERT_SLICE_LOADER not in loaders:
+            loaders.append(EXPERT_SLICE_LOADER)
+        kwargs["custom_weight_loader"] = loaders
 
     if (
         "cuda_graph_backend_prefill" in server_arg_field_names

@@ -91,6 +91,7 @@ from relax.utils.tq.lifecycle import attach_tq_client, detach_tq_client
 from relax.utils.tracking_utils import init_tracking
 from relax.utils.training import train_dump_utils
 from relax.utils.training.data_fields import build_data_fields
+from relax.utils.training.inline_log_probs import can_reuse_colocate_log_probs
 from relax.utils.training.routing_replay import RoutingReplay
 from relax.utils.types import RolloutBatch
 from relax.utils.utils import (
@@ -1971,6 +1972,12 @@ class MegatronTrainRayActor(TrainRayActor):
             data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
         else:
             data_iterator, num_microbatches = prepared_data_iterator, prepared_num_microbatches
+        inline_old_log_probs = hasattr(self, "weights_backuper") and can_reuse_colocate_log_probs(
+            self.args,
+            num_microbatches,
+            backup_tags=self.weights_backuper.backup_tags,
+            rollout_data_postprocess=self.rollout_data_postprocess,
+        )
         # Create a separate iterator with a larger token budget for ref/teacher log-probs
         if (
             not is_offline_mode(self.args)
@@ -2037,7 +2044,11 @@ class MegatronTrainRayActor(TrainRayActor):
                     )
 
                 self._switch_model("old_actor" if self.args.keep_old_actor else "actor")
-                if not standard_dpo and (not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics):
+                if (
+                    not standard_dpo
+                    and not inline_old_log_probs
+                    and (not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics)
+                ):
                     if self.args.use_routing_replay:
                         if self.args.use_rollout_routing_replay:
                             os.environ["ROUTING_REPLAY_STAGE"] = "replay_forward"
@@ -2069,7 +2080,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 # because we may need normalize the whole rollout.
                 capture_hooks.begin_rollout_for(self.args, rollout_id)
                 try:
-                    compute_advantages_and_returns(self.args, rollout_data)
+                    compute_advantages_and_returns(self.args, rollout_data, inline_log_probs=inline_old_log_probs)
                     capture_hooks.capture_rollout_advantage(rollout_data=rollout_data, args=self.args)
                 finally:
                     capture_hooks.end_rollout_for()
