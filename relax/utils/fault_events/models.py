@@ -62,6 +62,51 @@ def encode(value: dict[str, object]) -> bytes:
 
 
 @dataclass(frozen=True, slots=True)
+class FaultContext:
+    """One observed unhealthy period and its stable discovery/escalation
+    IDs."""
+
+    role: str
+    fault_id: str
+    source_generation: int
+    event_id: str
+    reason: str
+    fatal: bool = False
+    fatal_event_id: str | None = None
+
+    def validate(self) -> None:
+        if type(self) is not FaultContext:
+            raise ValueError("INVALID_FAULT")
+        if type(self.role) is not str or len(self.role) > 10 or self.role not in ROLES:
+            raise ValueError("INVALID_FAULT")
+        if not all(valid_id(value) for value in (self.fault_id, self.event_id)):
+            raise ValueError("INVALID_FAULT")
+        if not valid_uint(self.source_generation) or type(self.fatal) is not bool:
+            raise ValueError("INVALID_FAULT")
+        if type(self.reason) is not str or self.reason not in REASONS["fault_detected"]:
+            raise ValueError("INVALID_FAULT")
+        if self.reason == "fatal_error":
+            if not self.fatal or self.fatal_event_id is not None:
+                raise ValueError("INVALID_FAULT")
+        elif self.fatal:
+            if not valid_id(self.fatal_event_id) or self.fatal_event_id == self.event_id:
+                raise ValueError("INVALID_FAULT")
+        elif self.fatal_event_id is not None:
+            raise ValueError("INVALID_FAULT")
+
+    @classmethod
+    def from_dict(cls, payload: object) -> FaultContext:
+        if type(payload) is not dict or len(payload) != 7:
+            raise ValueError("INVALID_FAULT")
+        fields = {"role", "fault_id", "source_generation", "event_id", "reason", "fatal", "fatal_event_id"}
+        if any(type(key) is not str for key in payload) or payload.keys() != fields:
+            raise ValueError("INVALID_FAULT")
+        context = cls(**payload)
+        context.validate()
+        return context
+
+
+@dataclass(frozen=True, slots=True)
 class EventDraft:
     """An event before the Store assigns its sequence and recording time."""
 

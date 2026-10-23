@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from argparse import Namespace
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import ray
 import requests
@@ -24,6 +24,18 @@ __all__ = ["Service", "_require_node_group_markers", "create_placement_group"]
 
 
 logger = get_logger(__name__)
+
+
+def _observe_recovery(observer: Callable[..., None] | None, *, observed: int = 0, failed: int = 0) -> None:
+    if observer is None:
+        return
+    try:
+        observer(observed=observed, failed=failed)
+    except Exception:
+        try:
+            logger.warning("Fault observation unavailable")
+        except Exception:
+            pass
 
 
 class Service:
@@ -259,7 +271,7 @@ class Service:
         service."""
         return self.handle.recv_weight_fully_async.remote()
 
-    def restart(self) -> None:
+    def restart(self, fault_observer: Callable[..., None] | None = None) -> None:
         """Restart this service in-place: reuse placement groups and dynamic
         state.
 
@@ -297,6 +309,7 @@ class Service:
 
         recovery_load_path(self.config)  # Ensure config has the correct checkpoint paths after restart
         self._deploy(pgs)
+        _observe_recovery(fault_observer, observed=1)
         logger.info(f"[{self.role}] Service redeployed successfully")
 
         current_step = 0
@@ -310,11 +323,15 @@ class Service:
         try:
             self._http_call(self.role, "/set_step", method="POST", params={"step": current_step})
             logger.info(f"[{self.role}] Restored step to {current_step}")
+            _observe_recovery(fault_observer, observed=2)
         except Exception as e:
+            _observe_recovery(fault_observer, failed=2)
             logger.warning(f"[{self.role}] Failed to restore step: {e}")
 
         self._task_ref = None
         task_ref = self.run()
+        if task_ref is not None:
+            _observe_recovery(fault_observer, observed=4)
         logger.info(f"[{self.role}] Service task re-launched after restart, task_ref={task_ref}")
 
     def _ensure_placement_group(self) -> Optional[Any]:
