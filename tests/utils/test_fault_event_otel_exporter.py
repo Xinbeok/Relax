@@ -386,8 +386,8 @@ def test_no_endpoint_disabled_feature_and_sdk_disabled_create_no_sink(monkeypatc
         ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer private;token"),
         ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", 'Authorization=Bearer private"token'),
         ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer private\\token"),
-        ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer\nprivate-token"),
-        ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer\x0bprivate-token"),
+        ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=\nPRIVATE_TOKEN"),
+        ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=\x0bPRIVATE_TOKEN"),
     ],
 )
 def test_invalid_configuration_has_fixed_errors_and_no_start(monkeypatch, name, value):
