@@ -177,10 +177,11 @@ RUN wget -q https://github.com/apptainer/apptainer/releases/download/v1.4.1/appt
 
 COPY requirements.txt /tmp/requirements.txt
 
+# Keep the base image's OTel umbrella and gRPC exporter aligned with the SDK/HTTP exporter.
 RUN --mount=type=bind,source=docker/patch/transferqueue/9784ad0-assignment-transform.patch,target=/tmp/tq-assignment.patch \
     pip install --no-cache-dir "ray[default,serve]==2.56.1" && \
     pip install --ignore-installed PyJWT && \
-    pip install -r /tmp/requirements.txt --no-cache-dir && \
+    pip install -r /tmp/requirements.txt "opentelemetry-exporter-otlp>=1.45.0,<1.46" --no-cache-dir && \
     pip install --no-cache-dir "compressed_tensors>=0.13.0" tensordict==0.10.0 pyvers==0.1.0 'nvidia-modelopt[hf]==0.44.0' --no-deps && \
     pip install "transferqueue @ git+https://github.com/redai-studio/TransferQueue.git@9784ad0d8a5f0db93ff8326379ab2a6d06e640a0" --no-deps && \
     TQ_SITE="$(python -c 'import importlib.util; from pathlib import Path; print(Path(importlib.util.find_spec("transfer_queue").origin).parent.parent)')" && \
