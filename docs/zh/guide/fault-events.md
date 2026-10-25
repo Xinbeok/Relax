@@ -110,7 +110,7 @@ export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/protobuf
 # 为既有训练命令增加 --use-health-check --fault-events-enabled。
 ```
 
-日志专用 endpoint 是完整 URL；也可设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 基础地址，由导出端追加 `/v1/logs`。本接口仅支持 `http/protobuf`，遵循 `OTEL_SDK_DISABLED`，请求头和超时使用官方 exporter 的标准日志专用／通用环境变量。请求头必须符合 OTLP 环境变量语法；原始引号、分号或反斜杠会在 SDK 解析前被拒绝，URL 编码后的值可以使用。为避免可选认证代码阻塞训练启动，本故障专用接口拒绝 credential-provider entry point。不使用 exporter 隐式的 localhost 默认地址。未配置 endpoint 时不启动导出线程，本地历史和查询继续工作；配置或导出异常不改变本地提交结果。
+日志专用 endpoint 是完整 URL；也可设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 基础地址，由导出端追加 `/v1/logs`。本接口仅支持 `http/protobuf`，遵循 `OTEL_SDK_DISABLED`，请求头和超时使用官方 exporter 的标准日志专用／通用环境变量。请求头必须符合 OTLP 环境变量语法；原始控制字符或分隔符会在 SDK 解析前被拒绝，URL 编码后的值可以使用。为避免可选认证代码阻塞训练启动，本故障专用接口拒绝 credential-provider entry point。不使用 exporter 隐式的 localhost 默认地址。未配置 endpoint 时不启动导出线程，本地历史和查询继续工作；配置或导出异常不改变本地提交结果。
 
 每条记录的原生 `event_name` 和 `body` 均为 `relax.fault.<event_type>`。本地记录全部 17 个字段都有明确的白名单属性，不附加任意字典、异常、环境、配置或训练内容：
 

@@ -46,6 +46,12 @@ _WIDE_FIELDS = frozenset(("source_generation", "sequence", "recorded_at_ms"))
 _ERROR_EVENTS = frozenset(("fatal_escalated", "recovery_failed", "termination_requested"))
 _WARN_EVENTS = frozenset(("fault_detected", "recovery_interrupted", "handling_skipped"))
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+# Mirrors SDK 1.45's liberal environment-header grammar without invoking its
+# warning-producing parser on untrusted raw configuration.
+_SDK_HEADER = re.compile(
+    r"[ \t]*[!#$%&'*+.^_`|~0-9A-Za-z-]+[ \t]*=[ \t]*"
+    r"[\x20\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*[ \t]*"
+)
 _CREDENTIAL_PROVIDER_ENV = (
     "OTEL_PYTHON_EXPORTER_OTLP_HTTP_CREDENTIAL_PROVIDER",
     "OTEL_PYTHON_EXPORTER_OTLP_HTTP_LOGS_CREDENTIAL_PROVIDER",
@@ -96,10 +102,11 @@ def _headers() -> dict[str, str]:
             continue
         name, separator, value = item.partition("=")
         # SDK 1.45 parses the raw environment a second time even when an
-        # explicit ``headers`` mapping is supplied. Reject the raw characters
-        # its liberal parser would warn about before construction; encoded
-        # forms remain valid and are decoded below.
-        if any(char in value for char in ('"', ";", "\\")):
+        # explicit ``headers`` mapping is supplied. Mirror its liberal grammar
+        # before construction; encoded forms remain valid and are decoded
+        # below, while raw controls and credential-bearing malformed values
+        # never reach the SDK warning logger.
+        if not _SDK_HEADER.fullmatch(item):
             raise ValueError("INVALID_OTEL_CONFIG")
         name, value = unquote(name).strip(), unquote(value).strip()
         if (
