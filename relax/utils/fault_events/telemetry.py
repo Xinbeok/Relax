@@ -46,6 +46,10 @@ _WIDE_FIELDS = frozenset(("source_generation", "sequence", "recorded_at_ms"))
 _ERROR_EVENTS = frozenset(("fatal_escalated", "recovery_failed", "termination_requested"))
 _WARN_EVENTS = frozenset(("fault_detected", "recovery_interrupted", "handling_skipped"))
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_CREDENTIAL_PROVIDER_ENV = (
+    "OTEL_PYTHON_EXPORTER_OTLP_HTTP_CREDENTIAL_PROVIDER",
+    "OTEL_PYTHON_EXPORTER_OTLP_HTTP_LOGS_CREDENTIAL_PROVIDER",
+)
 _COUNTERS = ("admitted", "rejections", "exported", "export_failures", "shutdown_dropped", "context_errors")
 
 
@@ -91,6 +95,12 @@ def _headers() -> dict[str, str]:
         if not item.strip():
             continue
         name, separator, value = item.partition("=")
+        # SDK 1.45 parses the raw environment a second time even when an
+        # explicit ``headers`` mapping is supplied. Reject the raw characters
+        # its liberal parser would warn about before construction; encoded
+        # forms remain valid and are decoded below.
+        if any(char in value for char in ('"', ";", "\\")):
+            raise ValueError("INVALID_OTEL_CONFIG")
         name, value = unquote(name).strip(), unquote(value).strip()
         if (
             not separator
@@ -125,6 +135,12 @@ def _validate_sdk_environment() -> None:
     # invalid internal-metrics boolean, even with our NoOpMeterProvider.
     value = os.environ.get("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED")
     if value is not None and value.strip().lower() not in ("true", "false"):
+        raise ValueError("INVALID_OTEL_CONFIG")
+    # Credential-provider entry points execute synchronously inside the
+    # official HTTP exporter constructor. This fault-only interface keeps
+    # startup bounded and never invokes an optional provider selected by the
+    # ambient training environment.
+    if any(os.environ.get(name) for name in _CREDENTIAL_PROVIDER_ENV):
         raise ValueError("INVALID_OTEL_CONFIG")
 
 

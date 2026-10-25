@@ -103,7 +103,7 @@ def close_sink(sink):
 @pytest.mark.parametrize("with_context", [False, True])
 def test_real_sdk_http_protobuf_preserves_origin_and_whitelisted_fields(collector, monkeypatch, with_context):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", collector.endpoint + "/direct/logs")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer%20private-header")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer%20private%3Bheader")
     monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "private.resource=must-not-be-exported")
     monkeypatch.setenv("OTEL_SERVICE_NAME", "must-not-be-exported")
     original_logs, original_traces = _logs.get_logger_provider(), trace.get_tracer_provider()
@@ -129,7 +129,7 @@ def test_real_sdk_http_protobuf_preserves_origin_and_whitelisted_fields(collecto
             next(value for key, value in headers.items() if key.lower() == "content-type") == "application/x-protobuf"
         )
         assert (
-            next(value for key, value in headers.items() if key.lower() == "authorization") == "Bearer private-header"
+            next(value for key, value in headers.items() if key.lower() == "authorization") == "Bearer private;header"
         )
         assert {a.key: a.value.string_value for a in resource_logs.resource.attributes} == {"service.name": "relax"}
         assert scope.scope.name == "relax.fault_events"
@@ -325,6 +325,8 @@ def test_standard_compression_uses_real_sdk_protobuf_wire(collector, monkeypatch
         "OTEL_EXPORTER_OTLP_LOGS_COMPRESSION",
         "OTEL_EXPORTER_OTLP_COMPRESSION",
         "OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED",
+        "OTEL_PYTHON_EXPORTER_OTLP_HTTP_LOGS_CREDENTIAL_PROVIDER",
+        "OTEL_PYTHON_EXPORTER_OTLP_HTTP_CREDENTIAL_PROVIDER",
     ],
 )
 def test_invalid_sdk_environment_does_not_construct_exporter_or_log_raw_value(monkeypatch, caplog, setting):
@@ -343,14 +345,18 @@ def test_invalid_sdk_environment_does_not_construct_exporter_or_log_raw_value(mo
 
 
 @pytest.mark.parametrize(
-    "name",
-    ["OTEL_PYTHON_EXPORTER_OTLP_HTTP_LOGS_CREDENTIAL_PROVIDER", "OTEL_PYTHON_EXPORTER_OTLP_HTTP_CREDENTIAL_PROVIDER"],
+    "name,value",
+    [
+        ("OTEL_PYTHON_EXPORTER_OTLP_HTTP_LOGS_CREDENTIAL_PROVIDER", "PRIVATE_MISSING_CREDENTIAL_PROVIDER"),
+        ("OTEL_PYTHON_EXPORTER_OTLP_HTTP_CREDENTIAL_PROVIDER", "PRIVATE_MISSING_CREDENTIAL_PROVIDER"),
+        ("OTEL_PYTHON_EXPORTER_OTLP_HTTP_LOGS_CREDENTIAL_PROVIDER", "   "),
+    ],
 )
-def test_missing_sdk_credential_provider_has_only_fixed_startup_error(monkeypatch, caplog, name):
-    monkeypatch.setenv(name, "PRIVATE_MISSING_CREDENTIAL_PROVIDER")
-    with pytest.raises(RuntimeError, match="^OTEL_STARTUP_UNAVAILABLE$"):
+def test_sdk_credential_provider_is_rejected_before_synchronous_load(monkeypatch, caplog, name, value):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="^INVALID_OTEL_CONFIG$"):
         telemetry.FaultLogExporter("http://127.0.0.1:4318/v1/logs")
-    assert "PRIVATE_MISSING_CREDENTIAL_PROVIDER" not in caplog.text
+    assert not caplog.text
 
 
 def test_no_endpoint_disabled_feature_and_sdk_disabled_create_no_sink(monkeypatch):
@@ -377,6 +383,9 @@ def test_no_endpoint_disabled_feature_and_sdk_disabled_create_no_sink(monkeypatc
         ("OTEL_EXPORTER_OTLP_LOGS_TIMEOUT", "31"),
         ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "private-malformed-header"),
         ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "X-Test=private%0D%0Aheader"),
+        ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer private;token"),
+        ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", 'Authorization=Bearer private"token'),
+        ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer private\\token"),
     ],
 )
 def test_invalid_configuration_has_fixed_errors_and_no_start(monkeypatch, name, value):

@@ -10,6 +10,8 @@ propagation are assumed.
 
 import os
 import queue
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -70,7 +72,9 @@ def _drained(runtime):
         return not runtime._queue and not runtime._inflight
 
 
-def test_real_ray_source_context_reaches_driver_runtime_and_otlp_once(collector, monkeypatch):
+def check_local_ray_otel(collector, monkeypatch):
+    """Run the real source/driver check in the isolated child process."""
+
     if ray.is_initialized():
         pytest.fail("This test must own an isolated local Ray cluster; an existing cluster was left unchanged")
     for name in tuple(os.environ):
@@ -84,6 +88,7 @@ def test_real_ray_source_context_reaches_driver_runtime_and_otlp_once(collector,
         ray.init(
             address="local",
             num_cpus=2,
+            num_gpus=0,
             include_dashboard=False,
             _temp_dir=tempfile.mkdtemp(prefix="r12-otel-", dir="/tmp"),
             log_to_driver=False,
@@ -160,3 +165,36 @@ def test_real_ray_source_context_reaches_driver_runtime_and_otlp_once(collector,
                 provider.shutdown()
                 if ray.is_initialized():
                     ray.shutdown()
+
+
+def test_real_ray_source_context_reaches_driver_runtime_and_otlp_once():
+    """Preserve Ray clusters initialized by other modules during collection."""
+
+    was_initialized = ray.is_initialized()
+    child_env = os.environ.copy()
+    child_env.pop("RAY_ADDRESS", None)
+    existing_pythonpath = child_env.get("PYTHONPATH")
+    child_env["PYTHONPATH"] = str(ROOT) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(Path(__file__).resolve()),
+            "-o",
+            "python_functions=check_local_ray_otel",
+            "-q",
+            "--disable-warnings",
+        ],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+    assert "1 passed" in completed.stdout and " skipped" not in completed.stdout, output
+    if was_initialized:
+        marker = {"ray_parent_probe": "still-owned"}
+        assert ray.get(ray.put(marker)) == marker
