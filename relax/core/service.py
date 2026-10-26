@@ -33,8 +33,11 @@ def _observe_recovery(observer: Callable[..., None] | None, *, observed: int = 0
     try:
         observer(observed=observed, failed=failed)
     except Exception:
-        # The observer is caller-provided; its failure must not alter restart.
-        logger.warning("Fault observation unavailable")
+        # A caller-provided observer or a custom logger must not alter restart.
+        try:
+            logger.warning("Fault observation unavailable")
+        except Exception:
+            pass
 
 
 class Service:

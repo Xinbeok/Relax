@@ -95,8 +95,15 @@ def records(runtime):
     pytest.fail("event consumer failed to drain")
 
 
-def make_service(trace, *, failure=None):
+def make_service(trace, *, failure=None, observer_log_failure=False):
     logger = Mock()
+    if observer_log_failure:
+
+        def warning(message, *args, **kwargs):
+            if message == "Fault observation unavailable":
+                raise RuntimeError("observation log failure")
+
+        logger.warning.side_effect = warning
     namespace = {
         "logger": logger,
         "time": SimpleNamespace(sleep=lambda seconds: trace.append(("sleep", seconds))),
@@ -224,9 +231,9 @@ def test_actual_local_restart_preserves_business_trace_and_uses_real_step_eviden
     assert runtime.generation == 0
 
 
-def test_observer_failure_does_not_change_actual_service_restart():
+def test_observer_and_its_log_failure_do_not_change_actual_service_restart():
     trace, baseline = [], []
-    observed_service = make_service(trace)
+    observed_service = make_service(trace, observer_log_failure=True)
     baseline_service = make_service(baseline)
 
     def fail_observation(**kwargs):
