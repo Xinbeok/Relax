@@ -60,6 +60,17 @@ class Remote:
         self.remote = function
 
 
+@pytest.fixture(autouse=True)
+def cpu_algorithm_registry(monkeypatch):
+    # Controller recovery resolves roles through the registry, whose real
+    # module imports model components; substitute the same CPU role set.
+    registry = ModuleType("relax.core.registry")
+    registry.resolve_algorithm = lambda config: {
+        role: object for role in (Roles.actor, Roles.actor_fwd, Roles.advantages)
+    }
+    monkeypatch.setitem(sys.modules, "relax.core.registry", registry)
+
+
 @pytest.fixture
 def runtime():
     value = FaultEventRuntime()
@@ -161,7 +172,7 @@ def make_controller(runtime, services, trace, *, count=1, max_global_restart=3, 
         "threading": threading,
         "ROLES": Roles,
         "GENRM_ROLE": "genrm",
-        "ALGOS": {"cpu": {role: object for role in (Roles.actor, Roles.actor_fwd, Roles.advantages)}},
+        "ALGOS": {"cpu": {}},
         "resolve_sft_algo_key": lambda config: "cpu",
         "register_extra_roles": lambda config, algo: None,
         "os": SimpleNamespace(_exit=exit_process),

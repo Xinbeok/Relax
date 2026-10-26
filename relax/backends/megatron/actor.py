@@ -44,7 +44,7 @@ from relax.engine.sft.runtime import (
     sft_tq_num_shards,
     should_run_sft_eval,
     should_run_sft_predict,
-    should_skip_mtp_only_weight_management,
+    should_skip_sft_weight_management,
 )
 from relax.utils import device as device_utils
 from relax.utils import tracking_utils
@@ -518,7 +518,7 @@ class MegatronTrainRayActor(TrainRayActor):
         # Hybrid mode uses the TensorBackuper path: actor handles ref/actor_fwd
         # internally via _switch_model and pushes weights to rollout via
         # UpdateWeightFromTensor instead of DCS.
-        skip_weight_management = should_skip_mtp_only_weight_management(
+        skip_weight_management = should_skip_sft_weight_management(
             self.args,
             with_ref=with_ref,
             with_opd_teacher=with_opd_teacher,
@@ -631,7 +631,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 )
             )
         else:
-            logger.info("MTP-only SFT: skipping weight snapshots, rollout updater, and DCS client")
+            logger.info("Offline SFT: skipping weight snapshots, rollout updater, and DCS client")
         # empty cache after initialization
         clear_memory()
 
