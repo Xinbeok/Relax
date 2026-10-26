@@ -336,9 +336,9 @@ def test_invalid_sdk_environment_does_not_construct_exporter_or_log_raw_value(mo
     monkeypatch.setattr(_log_exporter, "OTLPLogExporter", constructor)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://127.0.0.1:4318/v1/logs")
     monkeypatch.setenv(setting, "PRIVATE_CONFIG_VALUE")
-    with pytest.raises(ValueError, match="^INVALID_OTEL_CONFIG$"):
+    with pytest.raises(ValueError, match="^INVALID_OTEL_CONFIG: "):
         telemetry.start_fault_log_exporter()
-    with pytest.raises(ValueError, match="^INVALID_OTEL_CONFIG$"):
+    with pytest.raises(ValueError, match="^INVALID_OTEL_CONFIG: "):
         telemetry.FaultLogExporter("http://127.0.0.1:4318/v1/logs")
     constructor.assert_not_called()
     assert "PRIVATE_CONFIG_VALUE" not in caplog.text
@@ -354,7 +354,7 @@ def test_invalid_sdk_environment_does_not_construct_exporter_or_log_raw_value(mo
 )
 def test_sdk_credential_provider_is_rejected_before_synchronous_load(monkeypatch, caplog, name, value):
     monkeypatch.setenv(name, value)
-    with pytest.raises(ValueError, match="^INVALID_OTEL_CONFIG$"):
+    with pytest.raises(ValueError, match="^INVALID_OTEL_CONFIG: "):
         telemetry.FaultLogExporter("http://127.0.0.1:4318/v1/logs")
     assert not caplog.text
 
@@ -395,9 +395,10 @@ def test_invalid_configuration_has_fixed_errors_and_no_start(monkeypatch, name, 
     monkeypatch.setenv(name, value)
     constructor = Mock(side_effect=AssertionError("invalid configuration must not start"))
     monkeypatch.setattr(telemetry, "FaultLogExporter", constructor)
-    with pytest.raises(ValueError, match="^INVALID_OTEL_CONFIG$"):
+    with pytest.raises(telemetry.OTelConfigError, match="^INVALID_OTEL_CONFIG: ") as raised:
         telemetry.start_fault_log_exporter()
     constructor.assert_not_called()
+    assert "private" not in str(raised.value).lower()
 
 
 @pytest.mark.parametrize("raises", [False, True])

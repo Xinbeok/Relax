@@ -8,7 +8,7 @@ import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 from unittest.mock import Mock
 
 import pytest
@@ -104,11 +104,15 @@ def test_actor_early_stop_is_not_success_or_health_failure(health):
 
 
 def controller_fixture():
-    ns = dict(logger=logging.getLogger(__name__), run=asyncio.run, asyncio=asyncio, Optional=Optional)
+    ns = dict(logger=logging.getLogger(__name__), run=asyncio.run, asyncio=asyncio, Any=Any, Optional=Optional)
     cls = load_methods(
-        "relax/core/controller.py", "Controller", {"restart_serve", "training_loop", "_consume_restart_cycle"}, ns
+        "relax/core/controller.py",
+        "Controller",
+        {"restart_serve", "training_loop", "_consume_restart_cycle", "_fault_call", "_start_fault_recovery"},
+        ns,
     )
     ctrl = cls()
+    ctrl._fault_events = None
     ctrl._restart_done_event = threading.Event()
     ctrl._restart_lock = threading.RLock()
     ctrl._restart_consumed_event = threading.Event()

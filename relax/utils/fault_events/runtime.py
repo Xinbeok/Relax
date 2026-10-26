@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING
 from relax.utils.logging_utils import get_logger
 
 from .context import FaultTraceContext, capture_trace_context, parse_trace_context
-from .models import MAX_UINT, REASONS, ROLES, EventDraft, FaultContext, new_id, valid_uint
+from .models import MAX_UINT, REASONS, EventDraft, FaultContext, new_id, service_role, valid_uint
 from .store import FaultEventStore, _Record
+from .telemetry import OTelConfigError
 
 
 if TYPE_CHECKING:
@@ -60,15 +61,6 @@ class _Publication:
     attempted: int = 0
     consumed: bool = False
     specials: int = 0
-
-
-def _role(value: object) -> str:
-    if not isinstance(value, str):
-        raise ValueError("INVALID_ROLE")
-    value = str.__str__(value)
-    if len(value) > 10 or value not in ROLES:
-        raise ValueError("INVALID_ROLE")
-    return value
 
 
 class FaultEventRuntime:
@@ -287,7 +279,7 @@ class FaultEventRuntime:
             if self.generation >= 0 and (self._source_retired or self._source_epoch[1].is_set()):
                 return
             if role is not None:
-                expected_role = _role(role)
+                expected_role = service_role(role)
             if payload is None and expected_role is None:
                 return
             if type(payload) is dict:
@@ -353,7 +345,7 @@ class FaultEventRuntime:
                 or len(payload["faults"]) > _MAX_MEMBERS
             ):
                 raise ValueError("INVALID_SNAPSHOT")
-            roles = tuple(_role(role) for role in payload["roles"])
+            roles = tuple(service_role(role) for role in payload["roles"])
             faults = tuple(FaultContext.from_dict(fault) for fault in payload["faults"])
             if (
                 len(set(roles)) != len(roles)
@@ -484,7 +476,7 @@ class FaultEventRuntime:
 
     def start_recovery(self, role: str, mode: str, expected: int) -> Recovery | None:
         try:
-            role = _role(role)
+            role = service_role(role)
             if (
                 type(mode) is not str
                 or mode not in ("local", "global")
@@ -684,7 +676,7 @@ class FaultEventRuntime:
 
     def special(self, role: str, kind: str, reason: str, recovery: Recovery | None = None) -> None:
         try:
-            role = _role(role)
+            role = service_role(role)
             if (
                 type(kind) is not str
                 or kind not in ("handling_skipped", "termination_requested")
@@ -1078,6 +1070,10 @@ def start_fault_events(*, enabled: bool, health_enabled: bool, port: int = 0) ->
         from .telemetry import start_fault_log_exporter
 
         runtime._log_exporter = start_fault_log_exporter(enabled=True)
+    except OTelConfigError as exc:
+        runtime._otel_error("startup")
+        # Fixed text naming the rejected setting; it never contains the value.
+        _warn(f"Fault event log export disabled: {exc.args[0]}")
     except Exception:
         runtime._otel_error("startup")
         _warn("Fault event log export unavailable")

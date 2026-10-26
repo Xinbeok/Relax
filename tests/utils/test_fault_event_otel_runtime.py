@@ -230,6 +230,25 @@ def test_export_off_or_invalid_configuration_preserves_local_queries(monkeypatch
         runtime.query_server._thread.join(3)
 
 
+def test_invalid_otel_configuration_warning_names_setting_without_value(monkeypatch):
+    from relax.utils.fault_events import runtime as runtime_module
+
+    warnings = []
+    monkeypatch.setattr(runtime_module, "_warn", warnings.append)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://127.0.0.1:4318/v1/logs")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=Bearer PRIVATE;TOKEN")
+    runtime = start_fault_events(enabled=True, health_enabled=True)
+    try:
+        assert runtime._log_exporter is None
+        assert warnings == [
+            "Fault event log export disabled: INVALID_OTEL_CONFIG: headers must use the SDK name=value grammar"
+        ]
+    finally:
+        runtime.close()
+        runtime._consumer.join(3)
+        runtime.query_server._thread.join(3)
+
+
 def test_source_sidecar_uses_discovery_and_upgrade_origins_not_health_poller(make_runtime, tracer):
     sink = MemorySink()
     runtime = make_runtime(log_exporter=sink)

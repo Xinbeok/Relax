@@ -139,7 +139,7 @@ def test_fault_source_accepts_underlying_string_without_enum_formatting():
 
 @pytest.mark.parametrize("generation", [-1, MAX_UINT + 1, True, "0", {}, 1.5])
 def test_fault_source_rejects_invalid_generation(generation):
-    with pytest.raises(ValueError, match="^INVALID_GENERATION$"):
+    with pytest.raises(ValueError, match="^INVALID_GENERATION: "):
         FaultSource(generation)
 
 
@@ -644,3 +644,21 @@ def test_real_checker_runtime_fatal_records_only_discovery_upgrade_and_terminati
             events[1]["event_id"] == status.get_service_health("actor", include_fault=True)["fault"]["fatal_event_id"]
         )
     assert [name for name, _, _ in rpc.calls] == ["get_unhealthy_services", "get_service_health"]
+
+
+@pytest.mark.parametrize(
+    "field,value,constraint",
+    [
+        ("role", "PRIVATE_ROLE", "role must be a supported service role"),
+        ("source_generation", -1, "source_generation must be an unsigned 64-bit int"),
+        ("reason", "PRIVATE_REASON", "reason must be a fault_detected reason code"),
+        ("fatal_event_id", new_id(), "a nonfatal fault has no fatal_event_id"),
+    ],
+)
+def test_fault_context_error_names_constraint_without_value(field, value, constraint):
+    source = FaultSource(0)
+    source.error("actor", "reported_error")
+    payload = {**source.get("actor"), field: value}
+    with pytest.raises(ValueError) as raised:
+        FaultContext.from_dict(payload)
+    assert raised.value.args == (f"INVALID_FAULT: {constraint}",)

@@ -16,6 +16,7 @@ from relax.distributed.ray.placement_group import (
     _require_node_group_markers,
     create_placement_group,
 )
+from relax.utils.fault_events.models import EVIDENCE_DEPLOYED, EVIDENCE_STEP_RESTORED, EVIDENCE_TASK_SUBMITTED
 from relax.utils.logging_utils import get_logger
 from relax.utils.utils import get_serve_url, recovery_load_path
 
@@ -32,10 +33,8 @@ def _observe_recovery(observer: Callable[..., None] | None, *, observed: int = 0
     try:
         observer(observed=observed, failed=failed)
     except Exception:
-        try:
-            logger.warning("Fault observation unavailable")
-        except Exception:
-            pass
+        # The observer is caller-provided; its failure must not alter restart.
+        logger.warning("Fault observation unavailable")
 
 
 class Service:
@@ -309,7 +308,7 @@ class Service:
 
         recovery_load_path(self.config)  # Ensure config has the correct checkpoint paths after restart
         self._deploy(pgs)
-        _observe_recovery(fault_observer, observed=1)
+        _observe_recovery(fault_observer, observed=EVIDENCE_DEPLOYED)
         logger.info(f"[{self.role}] Service redeployed successfully")
 
         current_step = 0
@@ -323,15 +322,15 @@ class Service:
         try:
             self._http_call(self.role, "/set_step", method="POST", params={"step": current_step})
             logger.info(f"[{self.role}] Restored step to {current_step}")
-            _observe_recovery(fault_observer, observed=2)
+            _observe_recovery(fault_observer, observed=EVIDENCE_STEP_RESTORED)
         except Exception as e:
-            _observe_recovery(fault_observer, failed=2)
+            _observe_recovery(fault_observer, failed=EVIDENCE_STEP_RESTORED)
             logger.warning(f"[{self.role}] Failed to restore step: {e}")
 
         self._task_ref = None
         task_ref = self.run()
         if task_ref is not None:
-            _observe_recovery(fault_observer, observed=4)
+            _observe_recovery(fault_observer, observed=EVIDENCE_TASK_SUBMITTED)
         logger.info(f"[{self.role}] Service task re-launched after restart, task_ref={task_ref}")
 
     def _ensure_placement_group(self) -> Optional[Any]:

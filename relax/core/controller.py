@@ -36,6 +36,15 @@ from relax.utils import device as device_utils
 from relax.utils.async_utils import run, shutdown_async_loop
 from relax.utils.data.identity_window_sampler import IdentityWindowSampler
 from relax.utils.env import Envs
+from relax.utils.fault_events.models import (
+    EVIDENCE_ACTOR_FWD_WEIGHT_RECEIVED,
+    EVIDENCE_ACTOR_WEIGHT_SENT,
+    EVIDENCE_DEPLOYED,
+    EVIDENCE_REFERENCE_WEIGHT_RECEIVED,
+    EVIDENCE_STEP_RESTORED,
+    EVIDENCE_TASK_SUBMITTED,
+    LOCAL_RECOVERY_EVIDENCE,
+)
 from relax.utils.health_system import HealthManager
 from relax.utils.logging_utils import get_logger
 from relax.utils.misc import load_function
@@ -179,10 +188,14 @@ def _actor_rollout_pg_roles(config: Namespace) -> list[str]:
 
 
 class Controller:
+    # Fault observation is optional; class defaults also cover controllers
+    # built with ``__new__``. ``__init__`` never resets ``_fault_recovery``
+    # because a global restart re-runs it while that recovery is in progress.
+    _fault_events: Any = None
+    _fault_recovery: Any = None
+
     def __init__(self, config: Namespace, runtime_env: dict = None, fault_events: Any = None) -> None:
-        if not hasattr(self, "_fault_events"):
-            self._fault_events = fault_events
-            self._fault_recovery = None
+        self._fault_events = fault_events
         self.config = config
         self.serve_dict = {}
         self._teacher_manager = None
@@ -716,44 +729,39 @@ class Controller:
         logger.info(f"[Global Restart] Cancelled {cancelled}/{len(refs_to_cancel)} pending task ref(s)")
 
     def _fault_call(self, method: str, *args, **kwargs) -> Any:
-        runtime = getattr(self, "_fault_events", None)
-        if runtime is None:
+        """Forward to the fault runtime; observation failures never change
+        recovery control flow."""
+        if self._fault_events is None:
             return None
         try:
-            if method in ("start_recovery", "special") and args and isinstance(args[0], str):
-                # Registry roles may be StrEnum. Normalize observation data
-                # without invoking a caller-defined __str__ implementation.
-                args = (str.__str__(args[0]), *args[1:])
-            return getattr(runtime, method)(*args, **kwargs)
+            return getattr(self._fault_events, method)(*args, **kwargs)
         except Exception:
             try:
-                runtime.note_unknown()
-            except Exception:
-                pass
-            try:
+                self._fault_events.note_unknown()
                 logger.warning("Fault observation unavailable")
             except Exception:
                 pass
             return None
 
     def _fault_plan(self, mode: str) -> int:
+        """Evidence a recovery must observe before it can succeed."""
         if mode == "local":
-            return 7
-        expected = 1 | 4
+            return LOCAL_RECOVERY_EVIDENCE
+        expected = EVIDENCE_DEPLOYED | EVIDENCE_TASK_SUBMITTED
         if not (getattr(self.config, "debug_train_only", False) or getattr(self.config, "debug_rollout_only", False)):
             if ROLES.actor in self.serve_dict:
-                expected |= 2
+                expected |= EVIDENCE_STEP_RESTORED
                 if getattr(self.config, "fully_async", False) and not getattr(self.config, "hybrid", False):
-                    expected |= 8
+                    expected |= EVIDENCE_ACTOR_WEIGHT_SENT
                     if ROLES.actor_fwd in self.serve_dict:
-                        expected |= 16
+                        expected |= EVIDENCE_ACTOR_FWD_WEIGHT_RECEIVED
                     if ROLES.reference in self.serve_dict:
-                        expected |= 32
+                        expected |= EVIDENCE_REFERENCE_WEIGHT_RECEIVED
         return expected
 
     def _start_fault_recovery(self, role: str, mode: str) -> None:
         self._fault_recovery = None
-        if getattr(self, "_fault_events", None) is None:
+        if self._fault_events is None:
             return
         try:
             expected = self._fault_plan(mode)
@@ -1559,7 +1567,7 @@ class Controller:
             logger.exception("Service recovery failed")
         finally:
             if self._restart_error is not None:
-                if self._restart_mode != "local" and getattr(self, "_fault_events", None) is not None:
+                if self._restart_mode != "local":
                     self._fault_call("finish", self._fault_recovery, "recovery_failed", "restart_exception")
                 checker = getattr(self._health_manager, "_checker", None)
                 if checker is not None:
@@ -1598,8 +1606,7 @@ class Controller:
         register_extra_roles(self.config, algo)
         cls = algo.get(role)
         if cls is None:
-            if getattr(self, "_fault_events", None) is not None:
-                self._fault_call("special", role, "handling_skipped", "role_unregistered")
+            self._fault_call("special", role, "handling_skipped", "role_unregistered")
             raise RuntimeError(f"No class registered for role '{role}' during recovery")
 
         restart_count = self._health_manager.increment_restart_count(role)
@@ -1619,8 +1626,7 @@ class Controller:
         }
         global_restart = role in full_rewire_roles or restart_count >= 3
         self._restart_mode = "global" if global_restart else "local"
-        if getattr(self, "_fault_events", None) is not None:
-            self._start_fault_recovery(role, self._restart_mode)
+        self._start_fault_recovery(role, self._restart_mode)
         if global_restart:
             # Perform full Controller re-initialization from zero when:
             # 1. Actor fails (core training service, all other services depend on it)
@@ -1636,7 +1642,7 @@ class Controller:
         else:
             # Delegate in-place restart to Service (reuses PG, restores step, syncs weights, re-runs task)
             service = self.serve_dict[role]
-            recovery = getattr(self, "_fault_recovery", None)
+            recovery = self._fault_recovery
             recovery_failed = True
             try:
                 if recovery is None:
@@ -1684,7 +1690,7 @@ class Controller:
             f"(max={self._max_global_restart}, full Controller re-initialization from zero) ==="
         )
         if self._global_restart_count > self._max_global_restart:
-            recovery = getattr(self, "_fault_recovery", None)
+            recovery = self._fault_recovery
             if recovery is not None:
                 self._fault_call(
                     "special", recovery.members[0].role, "termination_requested", "restart_limit", recovery
@@ -1870,7 +1876,7 @@ class Controller:
         saved_global_restart_count = self._global_restart_count
 
         try:
-            self.__init__(config, runtime_env)
+            self.__init__(config, runtime_env, fault_events=self._fault_events)
             # Restore fields that __init__ overwrites but must survive across restarts
             self._restarting = saved_restarting
             self._global_restart_count = saved_global_restart_count

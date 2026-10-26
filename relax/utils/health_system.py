@@ -56,7 +56,7 @@ class HealthStatus:
                 from relax.utils.fault_events.source import FaultSource
 
                 if not valid_uint(fault_generation):
-                    raise ValueError("INVALID_GENERATION")
+                    raise ValueError("INVALID_GENERATION: generation must be an unsigned 64-bit int")
                 self._fault_generation = fault_generation
                 self._fault_source = FaultSource(fault_generation)
             except Exception:
@@ -76,12 +76,10 @@ class HealthStatus:
 
     def _fault_details(self, role: str) -> dict:
         fault = self._observe("get", role)
-        try:
-            unavailable = (
-                self._fault_observation_error or getattr(self._fault_source, "observation_error", True) is not False
-            )
-        except Exception:
-            unavailable = True
+        # A source replaced by None after a failed observation stays unavailable.
+        unavailable = (
+            self._fault_observation_error or self._fault_source is None or self._fault_source.observation_error
+        )
         if fault is not None and type(fault) is not dict:
             fault, unavailable = None, True
         result = {
@@ -380,11 +378,9 @@ class HealthChecker:
         try:
             getattr(self.fault_events, method)(*args)
         except Exception:
+            # Observation failures never change the health-check result.
             try:
                 self.fault_events.note_unknown()
-            except Exception:
-                pass
-            try:
                 logger.warning("Fault observation unavailable")
             except Exception:
                 pass

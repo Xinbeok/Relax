@@ -51,9 +51,9 @@ def test_capture_copies_actual_optional_otel_api_context():
     ],
 )
 def test_invalid_contexts_use_fixed_error_and_never_raise_from_capture(payload):
-    with pytest.raises(ValueError, match="^INVALID_TRACE_CONTEXT$"):
+    with pytest.raises(ValueError, match="^INVALID_TRACE_CONTEXT: "):
         parse_trace_context(payload)
-    with pytest.raises(ValueError, match="^INVALID_TRACE_CONTEXT$"):
+    with pytest.raises(ValueError, match="^INVALID_TRACE_CONTEXT: "):
         parse_trace_contexts({"a" * 32: payload})
 
 
@@ -103,7 +103,7 @@ def test_malformed_optional_context_does_not_change_health_business_payload():
     "values", [(0, 1, 0), (1 << 128, 1, 0), (True, 1, 0), (1, 0, 0), (1, 1 << 64, 0), (1, 2, 256)]
 )
 def test_context_constructor_rejects_invalid_widths_and_is_immutable(values):
-    with pytest.raises(ValueError, match="^INVALID_TRACE_CONTEXT$"):
+    with pytest.raises(ValueError, match="^INVALID_TRACE_CONTEXT: "):
         FaultTraceContext(*values)
     context = FaultTraceContext(1, 2, 1)
     with pytest.raises(FrozenInstanceError):
@@ -116,7 +116,7 @@ def test_sidecar_map_is_bounded_and_optional():
     contexts = {f"{index:032x}": payload for index in range(18)}
     assert len(parse_trace_contexts(contexts)) == 18
     for invalid in ({**contexts, "f" * 32: payload}, {"short": payload}, {"a" * 32: None}):
-        with pytest.raises(ValueError, match="^INVALID_TRACE_CONTEXT$"):
+        with pytest.raises(ValueError, match="^INVALID_TRACE_CONTEXT: "):
             parse_trace_contexts(invalid)
 
 

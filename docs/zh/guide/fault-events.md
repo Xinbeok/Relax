@@ -100,7 +100,7 @@ assert len(page["events"]) == 1
 
 driver 统一持有一个官方 SDK 的私有 `LoggerProvider`，显式资源属性为 `service.name=relax`，并使用官方 OTLP HTTP exporter。只有 Store 新接纳并提交成功的事件，才将不可变的实际记录快照交给独立有界导出队列：最多 512 条排队、1 条在途。`offer` 在 Runtime 消费者线程上、Store 和接纳锁之外构造 SDK `LogRecord`；仅由独立导出线程执行 SDK emit、`SimpleLogRecordProcessor` 及导出／网络 I/O，也不再增加 SDK 批处理队列。
 
-依赖 Python 3.10 及更新版本的 `opentelemetry-sdk>=1.45.0,<1.46` 与 `opentelemetry-exporter-otlp-proto-http>=1.45.0,<1.46`，本地已实际验证 1.45.0 和 1.45.1 环境。约束在 1.45 系列，是为了保留 exporter 自有客户端的诊断接口，用于屏蔽可能包含敏感信息的传输错误细节；不修改全局 logger。若这一兼容契约不再满足，则拒绝启动导出，本地历史继续工作。只在启用故障日志导出时创建私有 provider 和 exporter。
+依赖 Python 3.10 及更新版本的 `opentelemetry-sdk>=1.45.0,<1.46` 与 `opentelemetry-exporter-otlp-proto-http>=1.45.0,<1.46`，并在同一范围声明 `opentelemetry-exporter-otlp` 汇总包，使镜像中预装的 gRPC exporter 与 SDK 保持同一版本；导出本身只走 HTTP。本地已实际验证 1.45.0 和 1.45.1 环境。约束在 1.45 系列，是为了保留 exporter 自有客户端的诊断接口，用于屏蔽可能包含敏感信息的传输错误细节；不修改全局 logger。若这一兼容契约不再满足，则拒绝启动导出，本地历史继续工作。只在启用故障日志导出时创建私有 provider 和 exporter。
 
 导出要求同时启用故障历史的两个开关，并显式配置接收端。在已有本地 OTLP HTTP 接收端的情况下，先为 driver 设置环境，再运行既有训练命令：
 
@@ -110,7 +110,7 @@ export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/protobuf
 # 为既有训练命令增加 --use-health-check --fault-events-enabled。
 ```
 
-日志专用 endpoint 是完整 URL；也可设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 基础地址，由导出端追加 `/v1/logs`。本接口仅支持 `http/protobuf`，遵循 `OTEL_SDK_DISABLED`，请求头和超时使用官方 exporter 的标准日志专用／通用环境变量。请求头必须符合 OTLP 环境变量语法；原始控制字符或分隔符会在 SDK 解析前被拒绝，URL 编码后的值可以使用。为避免可选认证代码阻塞训练启动，本故障专用接口拒绝 credential-provider entry point。不使用 exporter 隐式的 localhost 默认地址。未配置 endpoint 时不启动导出线程，本地历史和查询继续工作；配置或导出异常不改变本地提交结果。
+日志专用 endpoint 是完整 URL；也可设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 基础地址，由导出端追加 `/v1/logs`。本接口仅支持 `http/protobuf`，遵循 `OTEL_SDK_DISABLED`，请求头和超时使用官方 exporter 的标准日志专用／通用环境变量。请求头必须符合 OTLP 环境变量语法；原始控制字符或分隔符会在 SDK 解析前被拒绝，URL 编码后的值可以使用。为避免可选认证代码阻塞训练启动，本故障专用接口拒绝 credential-provider entry point。不使用 exporter 隐式的 localhost 默认地址。未配置 endpoint 时不启动导出线程，本地历史和查询继续工作；配置或导出异常不改变本地提交结果。被拒绝的配置只记录一条警告，写明设置项和约束，例如 `INVALID_OTEL_CONFIG: headers must use the SDK name=value grammar`，不包含配置值。
 
 每条记录的原生 `event_name` 和 `body` 均为 `relax.fault.<event_type>`。本地记录全部 17 个字段都有明确的白名单属性，不附加任意字典、异常、环境、配置或训练内容：
 

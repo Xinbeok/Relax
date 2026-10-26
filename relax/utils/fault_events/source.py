@@ -10,28 +10,17 @@ from .context import (
     parse_trace_context,
     parse_trace_contexts,
 )
-from .models import ROLES, FaultContext, new_id, valid_uint
+from .models import ROLES, FaultContext, new_id, service_role, valid_uint
 
 
 class FaultSource:
     def __init__(self, generation: int | None = None) -> None:
         if generation is not None and not valid_uint(generation):
-            raise ValueError("INVALID_GENERATION")
+            raise ValueError("INVALID_GENERATION: generation must be an unsigned 64-bit int")
         self.generation = generation
         self.faults: dict[str, FaultContext] = {}
         self._trace_contexts: dict[str, dict[str, FaultTraceContext]] = {}
         self.observation_error = False
-
-    @staticmethod
-    def _role(role: object) -> str:
-        if not isinstance(role, str):
-            raise ValueError("INVALID_ROLE")
-        # str enums and subclasses may override __str__. Read the underlying
-        # string without invoking their formatting or retaining the subclass.
-        role = str.__str__(role)
-        if len(role) > 10 or role not in ROLES:
-            raise ValueError("INVALID_ROLE")
-        return role
 
     def error(self, role: str, reason: str, fatal: bool = False) -> None:
         """Keep D and the first reason; allocate U only on a nonfatal-to-fatal
@@ -40,13 +29,11 @@ class FaultSource:
             return
         event_id = None
         try:
-            role = self._role(role)
+            role = service_role(role)
             if type(reason) is not str or reason not in ("reported_error", "heartbeat_timeout", "fatal_error"):
-                raise ValueError("INVALID_REASON")
-            if type(fatal) is not bool:
-                raise ValueError("INVALID_FATAL")
-            if reason == "fatal_error" and not fatal:
-                raise ValueError("INVALID_FATAL")
+                raise ValueError("INVALID_REASON: reason must be a fault_detected reason code")
+            if type(fatal) is not bool or (reason == "fatal_error" and not fatal):
+                raise ValueError("INVALID_FATAL: fatal must be a bool and true for fatal_error")
             old = self.faults.get(role)
             if old is None:
                 fault = FaultContext(
@@ -83,7 +70,7 @@ class FaultSource:
         if self.generation is None:
             return
         try:
-            role = self._role(role)
+            role = service_role(role)
             self.faults.pop(role, None)
         except Exception:
             self.observation_error = True
@@ -97,7 +84,7 @@ class FaultSource:
         if self.generation is None:
             return None
         try:
-            fault = self.faults.get(self._role(role))
+            fault = self.faults.get(service_role(role))
             if fault is not None:
                 FaultContext.validate(fault)
                 return asdict(fault)
@@ -108,7 +95,7 @@ class FaultSource:
     def trace_contexts(self, role: str) -> dict[str, dict[str, object]]:
         """Return validated D/U context copies, never SDK objects."""
         try:
-            role = self._role(role)
+            role = service_role(role)
             fault = self.faults.get(role)
             contexts = self._trace_contexts.get(role, {})
             if type(fault) is not FaultContext or type(contexts) is not dict or len(contexts) > 2:
@@ -134,7 +121,7 @@ class FaultSource:
         if type(roles) is list and self.generation is not None:
             for role in roles[: len(ROLES)]:
                 try:
-                    role = self._role(role)
+                    role = service_role(role)
                     if role in seen:
                         raise ValueError("DUPLICATE_ROLE")
                     seen.add(role)

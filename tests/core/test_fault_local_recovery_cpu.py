@@ -19,6 +19,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from relax.utils.fault_events import models as fault_models
 from relax.utils.fault_events.models import FaultContext, new_id
 from relax.utils.fault_events.runtime import FaultEventRuntime
 
@@ -48,7 +49,8 @@ def load_classes(path, names, namespace):
     tree = ast.parse((ROOT / path).read_text())
     selected = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
     module = ast.Module(body=ast.parse("from __future__ import annotations").body + selected, type_ignores=[])
-    namespace = {"__name__": "fault_local_cpu", "Enum": Enum, "IntEnum": IntEnum, **namespace}
+    evidence = {name: value for name, value in vars(fault_models).items() if "EVIDENCE" in name}
+    namespace = {"__name__": "fault_local_cpu", "Enum": Enum, "IntEnum": IntEnum, **evidence, **namespace}
     exec(compile(ast.fix_missing_locations(module), str(ROOT / path), "exec"), namespace)
     return namespace
 
@@ -93,15 +95,8 @@ def records(runtime):
     pytest.fail("event consumer failed to drain")
 
 
-def make_service(trace, *, failure=None, observer_log_failure=False):
+def make_service(trace, *, failure=None):
     logger = Mock()
-    if observer_log_failure:
-
-        def warning(message, *args, **kwargs):
-            if message == "Fault observation unavailable":
-                raise RuntimeError("observation log failure")
-
-        logger.warning.side_effect = warning
     namespace = {
         "logger": logger,
         "time": SimpleNamespace(sleep=lambda seconds: trace.append(("sleep", seconds))),
@@ -229,9 +224,9 @@ def test_actual_local_restart_preserves_business_trace_and_uses_real_step_eviden
     assert runtime.generation == 0
 
 
-def test_observer_and_its_log_failure_do_not_change_actual_service_restart():
+def test_observer_failure_does_not_change_actual_service_restart():
     trace, baseline = [], []
-    observed_service = make_service(trace, observer_log_failure=True)
+    observed_service = make_service(trace)
     baseline_service = make_service(baseline)
 
     def fail_observation(**kwargs):

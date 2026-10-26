@@ -26,7 +26,7 @@ class FaultTraceContext:
             or type(self.trace_flags) is not int
             or not 0 <= self.trace_flags < 256
         ):
-            raise ValueError("INVALID_TRACE_CONTEXT")
+            raise ValueError("INVALID_TRACE_CONTEXT: trace_id, span_id and trace_flags must be in OTel ranges")
 
     def to_payload(self) -> dict[str, object]:
         """Create one canonical, fixed-width wire copy."""
@@ -62,7 +62,7 @@ def parse_trace_context(payload: object) -> FaultTraceContext | None:
             raise ValueError
         return FaultTraceContext(int(trace_id, 16), int(span_id, 16), flags)
     except Exception:
-        raise ValueError("INVALID_TRACE_CONTEXT") from None
+        raise ValueError("INVALID_TRACE_CONTEXT: payload needs hex trace_id/span_id and int trace_flags") from None
 
 
 def parse_trace_contexts(payload: object) -> dict[str, FaultTraceContext]:
@@ -82,7 +82,7 @@ def parse_trace_contexts(payload: object) -> dict[str, FaultTraceContext]:
             contexts[event_id] = context
         return contexts
     except Exception:
-        raise ValueError("INVALID_TRACE_CONTEXT") from None
+        raise ValueError("INVALID_TRACE_CONTEXT: sidecar maps at most 18 hex event IDs to contexts") from None
 
 
 def capture_trace_context() -> FaultTraceContext | None:

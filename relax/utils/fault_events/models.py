@@ -26,6 +26,15 @@ REASONS = MappingProxyType(
         "termination_requested": ("fatal_error", "restart_limit"),
     }
 )
+# Recovery evidence bits. Local recovery requires the first three; a global plan
+# adds the weight-sync bits only for the fully async roles it rebuilds.
+EVIDENCE_DEPLOYED = 1
+EVIDENCE_STEP_RESTORED = 2
+EVIDENCE_TASK_SUBMITTED = 4
+EVIDENCE_ACTOR_WEIGHT_SENT = 8
+EVIDENCE_ACTOR_FWD_WEIGHT_RECEIVED = 16
+EVIDENCE_REFERENCE_WEIGHT_RECEIVED = 32
+LOCAL_RECOVERY_EVIDENCE = EVIDENCE_DEPLOYED | EVIDENCE_STEP_RESTORED | EVIDENCE_TASK_SUBMITTED
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 _REQUIRED_FIELDS = frozenset(("run_id", "fault_id", "event_id", "role", "source_generation", "event_type"))
 _DRAFT_FIELDS = _REQUIRED_FIELDS | {
@@ -54,6 +63,17 @@ def valid_uint(value: object, maximum: int = MAX_UINT) -> bool:
     return type(value) is int and 0 <= value <= maximum
 
 
+def service_role(value: object) -> str:
+    """Return the plain role string, accepting registry ``StrEnum`` members."""
+    if not isinstance(value, str):
+        raise ValueError("INVALID_ROLE: role must be a string")
+    # Read the underlying string without invoking a subclass's __str__.
+    value = str.__str__(value)
+    if len(value) > 10 or value not in ROLES:
+        raise ValueError("INVALID_ROLE: role must be a supported service role")
+    return value
+
+
 def encode(value: dict[str, object]) -> bytes:
     """Encode already validated fields without arbitrary object conversion."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
@@ -75,32 +95,33 @@ class FaultContext:
     fatal_event_id: str | None = None
 
     def validate(self) -> None:
+        # Messages name the violated field and constraint, never the value.
         if type(self) is not FaultContext:
-            raise ValueError("INVALID_FAULT")
+            raise ValueError("INVALID_FAULT: subclasses are not accepted")
         if type(self.role) is not str or len(self.role) > 10 or self.role not in ROLES:
-            raise ValueError("INVALID_FAULT")
+            raise ValueError("INVALID_FAULT: role must be a supported service role")
         if not all(valid_id(value) for value in (self.fault_id, self.event_id)):
-            raise ValueError("INVALID_FAULT")
-        if not valid_uint(self.source_generation) or type(self.fatal) is not bool:
-            raise ValueError("INVALID_FAULT")
+            raise ValueError("INVALID_FAULT: fault_id and event_id must be 32 lowercase hex digits")
+        if not valid_uint(self.source_generation):
+            raise ValueError("INVALID_FAULT: source_generation must be an unsigned 64-bit int")
+        if type(self.fatal) is not bool:
+            raise ValueError("INVALID_FAULT: fatal must be a bool")
         if type(self.reason) is not str or self.reason not in REASONS["fault_detected"]:
-            raise ValueError("INVALID_FAULT")
+            raise ValueError("INVALID_FAULT: reason must be a fault_detected reason code")
         if self.reason == "fatal_error":
             if not self.fatal or self.fatal_event_id is not None:
-                raise ValueError("INVALID_FAULT")
+                raise ValueError("INVALID_FAULT: a fatal_error discovery is fatal and has no fatal_event_id")
         elif self.fatal:
             if not valid_id(self.fatal_event_id) or self.fatal_event_id == self.event_id:
-                raise ValueError("INVALID_FAULT")
+                raise ValueError("INVALID_FAULT: an escalated fault needs a distinct fatal_event_id")
         elif self.fatal_event_id is not None:
-            raise ValueError("INVALID_FAULT")
+            raise ValueError("INVALID_FAULT: a nonfatal fault has no fatal_event_id")
 
     @classmethod
     def from_dict(cls, payload: object) -> FaultContext:
-        if type(payload) is not dict or len(payload) != 7:
-            raise ValueError("INVALID_FAULT")
         fields = {"role", "fault_id", "source_generation", "event_id", "reason", "fatal", "fatal_event_id"}
-        if any(type(key) is not str for key in payload) or payload.keys() != fields:
-            raise ValueError("INVALID_FAULT")
+        if type(payload) is not dict or any(type(key) is not str for key in payload) or payload.keys() != fields:
+            raise ValueError("INVALID_FAULT: payload must be a dict with exactly the FaultContext fields")
         context = cls(**payload)
         context.validate()
         return context

@@ -59,21 +59,31 @@ _CREDENTIAL_PROVIDER_ENV = (
 _COUNTERS = ("admitted", "rejections", "exported", "export_failures", "shutdown_dropped", "context_errors")
 
 
+class OTelConfigError(ValueError):
+    """Rejected exporter configuration.
+
+    Messages are fixed text naming the setting and constraint; they never
+    include the configured value, so they are safe to log.
+    """
+
+
 def _timeout(value: object) -> float:
     if type(value) not in (int, float):
-        raise ValueError("INVALID_OTEL_CONFIG")
+        raise OTelConfigError("INVALID_OTEL_CONFIG: timeout must be a number of seconds")
     try:
         result = float(value)
     except (ValueError, OverflowError):
-        raise ValueError("INVALID_OTEL_CONFIG") from None
+        raise OTelConfigError("INVALID_OTEL_CONFIG: timeout must be a number of seconds") from None
     if not math.isfinite(result) or not 0 < result <= 30:
-        raise ValueError("INVALID_OTEL_CONFIG")
+        raise OTelConfigError("INVALID_OTEL_CONFIG: timeout must be finite and in (0, 30] seconds")
     return result
 
 
 def _endpoint(value: object) -> str:
     if type(value) is not str or len(value) > 2048 or any(ord(char) <= 32 for char in value):
-        raise ValueError("INVALID_OTEL_CONFIG")
+        raise OTelConfigError(
+            "INVALID_OTEL_CONFIG: endpoint must be at most 2048 characters without whitespace or controls"
+        )
     try:
         parts = urlsplit(value)
         if (
@@ -87,7 +97,9 @@ def _endpoint(value: object) -> str:
         ):
             raise ValueError
     except (ValueError, UnicodeError):
-        raise ValueError("INVALID_OTEL_CONFIG") from None
+        raise OTelConfigError(
+            "INVALID_OTEL_CONFIG: endpoint must be an http(s) URL with a host and no credentials, query or fragment"
+        ) from None
     return value
 
 
@@ -95,7 +107,7 @@ def _headers() -> dict[str, str]:
     # Validate first: SDK warnings about malformed headers echo their value.
     raw = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_HEADERS") or os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
     if len(raw) > 8192:
-        raise ValueError("INVALID_OTEL_CONFIG")
+        raise OTelConfigError("INVALID_OTEL_CONFIG: headers must be at most 8192 characters")
     result = {}
     for item in raw.split(","):
         if not item.strip():
@@ -107,7 +119,7 @@ def _headers() -> dict[str, str]:
         # below, while raw controls and credential-bearing malformed values
         # never reach the SDK warning logger.
         if not _SDK_HEADER.fullmatch(item):
-            raise ValueError("INVALID_OTEL_CONFIG")
+            raise OTelConfigError("INVALID_OTEL_CONFIG: headers must use the SDK name=value grammar")
         name, value = unquote(name).strip(), unquote(value).strip()
         if (
             not separator
@@ -117,7 +129,9 @@ def _headers() -> dict[str, str]:
             or any(ord(char) < 32 or ord(char) > 126 for char in value)
             or len(result) >= 32
         ):
-            raise ValueError("INVALID_OTEL_CONFIG")
+            raise OTelConfigError(
+                "INVALID_OTEL_CONFIG: headers allow at most 32 printable entries with bounded name and value lengths"
+            )
         result[name] = value
     return result
 
@@ -133,7 +147,7 @@ def _compression() -> str:
         .lower()
     )
     if value not in ("none", "gzip", "deflate"):
-        raise ValueError("INVALID_OTEL_CONFIG")
+        raise OTelConfigError("INVALID_OTEL_CONFIG: compression must be none, gzip or deflate")
     return value
 
 
@@ -142,13 +156,13 @@ def _validate_sdk_environment() -> None:
     # invalid internal-metrics boolean, even with our NoOpMeterProvider.
     value = os.environ.get("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED")
     if value is not None and value.strip().lower() not in ("true", "false"):
-        raise ValueError("INVALID_OTEL_CONFIG")
+        raise OTelConfigError("INVALID_OTEL_CONFIG: OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED must be true or false")
     # Credential-provider entry points execute synchronously inside the
     # official HTTP exporter constructor. This fault-only interface keeps
     # startup bounded and never invokes an optional provider selected by the
     # ambient training environment.
     if any(os.environ.get(name) for name in _CREDENTIAL_PROVIDER_ENV):
-        raise ValueError("INVALID_OTEL_CONFIG")
+        raise OTelConfigError("INVALID_OTEL_CONFIG: HTTP credential providers are not supported by the fault exporter")
 
 
 def _validated_record(record: object) -> dict[str, object]:
@@ -319,7 +333,7 @@ class FaultLogExporter:
         _compression()
         _validate_sdk_environment()
         if type(queue_capacity) is not int or not 1 <= queue_capacity <= _QUEUE_CAPACITY:
-            raise ValueError("INVALID_OTEL_CONFIG")
+            raise OTelConfigError("INVALID_OTEL_CONFIG: queue_capacity must be an int between 1 and 512")
         self._lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self._queue: deque[Any] = deque()
@@ -456,12 +470,12 @@ def start_fault_log_exporter(*, enabled: bool = True) -> FaultLogExporter | None
     _endpoint(endpoint)
     protocol = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL") or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
     if protocol is not None and protocol.strip().lower() != "http/protobuf":
-        raise ValueError("INVALID_OTEL_CONFIG")
+        raise OTelConfigError("INVALID_OTEL_CONFIG: protocol must be http/protobuf")
     raw_timeout = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_TIMEOUT") or os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT")
     try:
         timeout = _timeout(float(raw_timeout)) if raw_timeout is not None else _DEFAULT_TIMEOUT
     except (TypeError, ValueError, OverflowError):
-        raise ValueError("INVALID_OTEL_CONFIG") from None
+        raise OTelConfigError("INVALID_OTEL_CONFIG: timeout must be a number of seconds") from None
     _headers()
     _compression()
     _validate_sdk_environment()
