@@ -69,8 +69,10 @@ class HealthStatus:
             return getattr(self._fault_source, method)(*args)
         except Exception:
             self._fault_observation_error = True
-            # A failed clear/update must not reuse uncertain identity on a
-            # subsequent unhealthy period. The original health state survives.
+            # This boundary retires the source after a failed clear/update so
+            # the next unhealthy period cannot reuse uncertain identity. The
+            # original health state survives; runtime forwarding has no such
+            # identity-retirement responsibility.
             self._fault_source = None
             return None
 
@@ -372,19 +374,6 @@ class HealthChecker:
         else:
             logger.warning("Health checker did not stop within timeout")
 
-    def _fault_event(self, method: str, *args: Any) -> None:
-        if self.fault_events is None:
-            return
-        try:
-            getattr(self.fault_events, method)(*args)
-        except Exception:
-            # Observation failures never change the health-check result.
-            try:
-                self.fault_events.note_unknown()
-                logger.warning("Fault observation unavailable")
-            except Exception:
-                pass
-
     async def _check_loop(self) -> None:
         """Periodic health check loop."""
         while True:
@@ -398,23 +387,21 @@ class HealthChecker:
                 else:
                     snapshot = ray.get(self.health_status.get_unhealthy_services.remote(include_faults=True))
                     unhealthy = snapshot["roles"]
-                    self._fault_event("observe_snapshot", snapshot)
+                    self.fault_events.observe_snapshot(snapshot)
                 for role in unhealthy:
                     if self.fault_events is None:
                         health_info = ray.get(self.health_status.get_service_health.remote(role))
                     else:
                         health_info = ray.get(self.health_status.get_service_health.remote(role, include_fault=True))
                         if health_info.get("observation_error"):
-                            self._fault_event("note_unknown")
-                        if health_info.get("trace_contexts"):
-                            self._fault_event(
-                                "observe_fault", health_info.get("fault"), role, health_info["trace_contexts"]
-                            )
-                        else:
-                            self._fault_event("observe_fault", health_info.get("fault"), role)
+                            self.fault_events.note_unknown()
+                        self.fault_events.observe_fault(
+                            health_info.get("fault"), role, health_info.get("trace_contexts")
+                        )
                     error_msg = health_info.get("error", "Unknown error")
                     if health_info.get("fatal"):
-                        self._fault_event("special", role, "termination_requested", "fatal_error")
+                        if self.fault_events is not None:
+                            self.fault_events.special(role, "termination_requested", "fatal_error")
                         # Skip the restart ladder entirely: this error is
                         # deterministic, retrying just delays the inevitable
                         # ``os._exit`` from ``_global_restart`` by ~12 wasted
@@ -456,11 +443,10 @@ class HealthChecker:
                         )
                         fault = details.get("fault") if type(details) is dict else None
                         if fault is None:
-                            self._fault_event("note_unknown")
-                        if type(details) is dict and details.get("trace_contexts"):
-                            self._fault_event("observe_fault", fault, role, details["trace_contexts"])
-                        else:
-                            self._fault_event("observe_fault", fault, role)
+                            self.fault_events.note_unknown()
+                        self.fault_events.observe_fault(
+                            fault, role, details.get("trace_contexts") if type(details) is dict else None
+                        )
                     self.on_unhealthy(role)
                     if self._stop_event.is_set():
                         logger.info("Stop event set after on_unhealthy callback (stale), exiting check loop")
@@ -497,24 +483,9 @@ class HealthManager:
             check_interval: Interval for periodic health checks.
         """
         self._fault_events = fault_events
-        generation = None
-        if fault_events is not None:
-            try:
-                from relax.utils.fault_events.models import valid_uint
-
-                generation, _ = fault_events.bind_source()
-                if not valid_uint(generation):
-                    raise ValueError("INVALID_GENERATION")
-            except Exception:
-                generation = None
-                try:
-                    fault_events.note_unknown()
-                except Exception:
-                    pass
+        generation = fault_events.bind_source()[0] if fault_events is not None else None
         status_class = HealthStatus.options(**with_control_plane_affinity(config))
-        self.status = (
-            status_class.remote(fault_generation=generation) if generation is not None else status_class.remote()
-        )
+        self.status = status_class.remote(fault_generation=generation)
         self._checker: Optional[HealthChecker] = None
         self._check_interval = check_interval
         logger.info("HealthManager initialized")
@@ -541,7 +512,7 @@ class HealthManager:
             on_unhealthy=on_unhealthy,
             check_interval=self._check_interval,
             on_fatal=on_fatal,
-            **({"fault_events": self._fault_events} if self._fault_events is not None else {}),
+            fault_events=self._fault_events,
         )
         self._checker.start()
         logger.info("Health management system started")

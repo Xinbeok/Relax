@@ -8,6 +8,7 @@ import threading
 import time
 from enum import Enum
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -52,7 +53,7 @@ class ObserverSpy:
     def observe_snapshot(self, payload):
         self.calls.append(("snapshot", payload))
 
-    def observe_fault(self, payload, role=None):
+    def observe_fault(self, payload, role=None, trace_contexts=None):
         self.calls.append(("fault", payload, role))
 
     def special(self, *args):
@@ -141,6 +142,12 @@ def test_fault_source_accepts_underlying_string_without_enum_formatting():
 def test_fault_source_rejects_invalid_generation(generation):
     with pytest.raises(ValueError, match="^INVALID_GENERATION: "):
         FaultSource(generation)
+    status = HealthStatusImpl(fault_generation=generation)
+    status.report_error("actor", "business failure")
+    snapshot = status.get_unhealthy_services(include_faults=True)
+    assert snapshot["roles"] == ["actor"]
+    assert snapshot["source_generation"] is None and not snapshot["faults"]
+    assert snapshot["observation_error"] and status._fault_source is None
 
 
 @pytest.mark.parametrize(
@@ -350,23 +357,18 @@ def test_real_checker_stale_identity_returns_in_original_mark_rpc(enabled):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_real_checker_observer_and_logging_exceptions_do_not_suppress_callback(monkeypatch, enabled):
-    status = HealthStatusImpl(fault_generation=0 if enabled else None)
+def test_real_checker_runtime_observation_failures_do_not_suppress_callback(monkeypatch, caplog, enabled, runtime):
+    generation = runtime.bind_source()[0] if enabled else None
+    status = HealthStatusImpl(fault_generation=generation)
     status.report_error("actor", "failure")
     rpc = LocalStatusRPC(status)
 
     def fail(*args, **kwargs):
         raise RuntimeError("SECRET")
 
-    warning = health_system.logger.warning
-
-    def fail_observation_log(message, *args, **kwargs):
-        if message == "Fault observation unavailable":
-            fail()
-        return warning(message, *args, **kwargs)
-
-    monkeypatch.setattr(health_system.logger, "warning", fail_observation_log)
-    observer = SimpleNamespace(observe_snapshot=fail, observe_fault=fail, note_unknown=fail) if enabled else None
+    monkeypatch.setattr(runtime, "_observe_snapshot", fail)
+    monkeypatch.setattr(runtime, "_observe_fault", fail)
+    observer = runtime if enabled else None
     actions = []
 
     def recover(role):
@@ -377,31 +379,20 @@ def test_real_checker_observer_and_logging_exceptions_do_not_suppress_callback(m
     asyncio.run(checker._check_loop())
     assert actions == ["actor"]
     assert [name for name, _, _ in rpc.calls] == ["get_unhealthy_services", "get_service_health"]
+    assert runtime.diagnostics()["coverage_unknown"] is enabled
+    assert "SECRET" not in caplog.text
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_real_checker_fatal_preserves_callback_and_exit_despite_observation_log_error(monkeypatch, enabled):
-    status = HealthStatusImpl(fault_generation=0 if enabled else None)
+def test_real_checker_fatal_preserves_callback_and_exit_despite_runtime_failure(monkeypatch, caplog, enabled, runtime):
+    generation = runtime.bind_source()[0] if enabled else None
+    status = HealthStatusImpl(fault_generation=generation)
     status.report_error("actor", "fatal business error", fatal=True)
-    rpc, observer = LocalStatusRPC(status), ObserverSpy() if enabled else None
+    rpc, observer = LocalStatusRPC(status), runtime if enabled else None
     actions = []
 
-    warning = health_system.logger.warning
-
-    def fail_observation_log(message, *args, **kwargs):
-        if message == "Fault observation unavailable":
-            raise RuntimeError("SECRET")
-        return warning(message, *args, **kwargs)
-
-    monkeypatch.setattr(health_system.logger, "warning", fail_observation_log)
-    if enabled:
-        special = observer.special
-
-        def failed_observation(*args):
-            special(*args)
-            raise RuntimeError("SECRET")
-
-        observer.special = failed_observation
+    special = Mock(side_effect=RuntimeError("SECRET"))
+    monkeypatch.setattr(runtime, "_special", special)
 
     def on_fatal(role, error):
         actions.append((role, error))
@@ -419,11 +410,16 @@ def test_real_checker_fatal_preserves_callback_and_exit_despite_observation_log_
     assert exc.value.code == 1 and actions == [("actor", "fatal business error")]
     assert [name for name, _, _ in rpc.calls] == ["get_unhealthy_services", "get_service_health"]
     if enabled:
-        assert ("special", "actor", "termination_requested", "fatal_error") in observer.calls
+        special.assert_called_once()
+        assert special.call_args.args[:3] == ("actor", "termination_requested", "fatal_error")
+        assert runtime.diagnostics()["coverage_unknown"]
+    else:
+        special.assert_not_called()
+    assert "SECRET" not in caplog.text
 
 
 @pytest.mark.parametrize("binding", ["disabled", "valid", "raises", "invalid"])
-def test_health_manager_observer_binding_keeps_health_creation_available(monkeypatch, binding):
+def test_health_manager_observer_binding_keeps_health_creation_available(monkeypatch, binding, runtime):
     created = []
 
     class ActorClass:
@@ -434,22 +430,29 @@ def test_health_manager_observer_binding_keeps_health_creation_available(monkeyp
         @staticmethod
         def remote(*args, **kwargs):
             created.append((args, kwargs))
-            return object()
+            return HealthStatusImpl(**kwargs)
 
     monkeypatch.setattr(health_system, "HealthStatus", ActorClass)
-    observer = ObserverSpy()
-
-    def bind():
-        if binding == "raises":
-            raise RuntimeError("SECRET")
-        return (True if binding == "invalid" else 0), None
-
-    observer.bind_source = bind
-    manager = health_system.HealthManager(fault_events=None if binding == "disabled" else observer)
+    bind = Mock(wraps=runtime.bind_source)
+    if binding == "raises":
+        monkeypatch.setattr(runtime, "_bind_source", Mock(side_effect=RuntimeError("SECRET")))
+    elif binding == "invalid":
+        # The actor remains the validation boundary even for a malformed peer.
+        bind = Mock(return_value=(True, None))
+    monkeypatch.setattr(runtime, "bind_source", bind)
+    observer = None if binding == "disabled" else runtime
+    manager = health_system.HealthManager(fault_events=observer)
     assert manager.status is not None
-    assert created == [((), {"fault_generation": 0} if binding == "valid" else {})]
-    if binding in ("raises", "invalid"):
-        assert observer.calls == [("unknown",)]
+    generation = {"valid": 0, "invalid": True}.get(binding)
+    assert created == [((), {"fault_generation": generation})]
+    assert bind.call_count == int(binding != "disabled")
+    assert manager.status._fault_observation_error is (binding == "invalid")
+    if binding == "raises":
+        assert runtime.diagnostics()["coverage_unknown"]
+    monkeypatch.setattr(health_system.HealthChecker, "start", lambda self: None)
+    manager.start(lambda role: None)
+    assert manager._checker.health_status is manager.status
+    assert manager._checker.fault_events is observer
 
 
 def test_real_health_thread_with_observer_can_stop_shared_loop_and_itself(runtime):
