@@ -8,7 +8,6 @@ from .context import (
     FaultTraceContext,
     capture_trace_context,
     parse_trace_context,
-    parse_trace_contexts,
 )
 from .models import ROLES, FaultContext, new_id, service_role, valid_uint
 
@@ -144,9 +143,7 @@ class FaultSource:
                 for event_id, payload in self.trace_contexts(fault["role"]).items()
             }
             if contexts and len(contexts) <= MAX_TRACE_CONTEXTS:
-                result["trace_contexts"] = {
-                    key: value.to_payload() for key, value in parse_trace_contexts(contexts).items()
-                }
+                result["trace_contexts"] = contexts
         except Exception:
             pass
         return result

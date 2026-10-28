@@ -390,15 +390,18 @@ def test_no_endpoint_disabled_feature_and_sdk_disabled_create_no_sink(monkeypatc
         ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "Authorization=\x0bPRIVATE_TOKEN"),
     ],
 )
-def test_invalid_configuration_has_fixed_errors_and_no_start(monkeypatch, name, value):
+def test_invalid_configuration_never_reaches_sdk_or_logs_raw_values(monkeypatch, caplog, name, value):
+    from opentelemetry.exporter.otlp.proto.http import _log_exporter
+
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://127.0.0.1:4318/v1/logs")
     monkeypatch.setenv(name, value)
-    constructor = Mock(side_effect=AssertionError("invalid configuration must not start"))
-    monkeypatch.setattr(telemetry, "FaultLogExporter", constructor)
+    constructor = Mock(side_effect=AssertionError("invalid configuration must not reach SDK construction"))
+    monkeypatch.setattr(_log_exporter, "OTLPLogExporter", constructor)
     with pytest.raises(telemetry.OTelConfigError, match="^INVALID_OTEL_CONFIG: ") as raised:
         telemetry.start_fault_log_exporter()
     constructor.assert_not_called()
     assert "private" not in str(raised.value).lower()
+    assert value not in caplog.text
 
 
 @pytest.mark.parametrize("raises", [False, True])

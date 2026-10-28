@@ -467,7 +467,6 @@ def start_fault_log_exporter(*, enabled: bool = True) -> FaultLogExporter | None
             return None
         parts = urlsplit(_endpoint(generic))
         endpoint = urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/") + "/v1/logs", "", ""))
-    _endpoint(endpoint)
     protocol = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL") or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
     if protocol is not None and protocol.strip().lower() != "http/protobuf":
         raise OTelConfigError("INVALID_OTEL_CONFIG: protocol must be http/protobuf")
@@ -476,7 +475,4 @@ def start_fault_log_exporter(*, enabled: bool = True) -> FaultLogExporter | None
         timeout = _timeout(float(raw_timeout)) if raw_timeout is not None else _DEFAULT_TIMEOUT
     except (TypeError, ValueError, OverflowError):
         raise OTelConfigError("INVALID_OTEL_CONFIG: timeout must be a number of seconds") from None
-    _headers()
-    _compression()
-    _validate_sdk_environment()
     return FaultLogExporter(endpoint, timeout=timeout)
