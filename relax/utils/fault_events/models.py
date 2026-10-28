@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from enum import IntFlag
+from enum import Enum, IntFlag
 from types import MappingProxyType
 from uuid import uuid4
 
@@ -69,15 +69,10 @@ def valid_uint(value: object, maximum: int = MAX_UINT) -> bool:
     return type(value) is int and 0 <= value <= maximum
 
 
-def service_role(value: object) -> str:
-    """Return the plain role string, accepting registry ``StrEnum`` members."""
-    if not isinstance(value, str):
-        raise ValueError("INVALID_ROLE: role must be a string")
-    # A plain str/Enum on Python 3.10 formats as "Roles.actor"; the registry's
-    # compatibility StrEnum overrides __str__, as other subclasses may too.
-    # Read the underlying string directly without invoking those overrides.
-    value = str.__str__(value)
-    if len(value) > 10 or value not in ROLES:
+def service_role(role: str) -> str:
+    """Return the plain role name for a role string or registry enum member."""
+    value = role.value if isinstance(role, Enum) else role
+    if type(value) is not str or value not in ROLES:
         raise ValueError("INVALID_ROLE: role must be a supported service role")
     return value
 

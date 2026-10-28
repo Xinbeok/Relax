@@ -13,7 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from relax.utils import async_utils, health_system
-from relax.utils.fault_events.models import MAX_UINT, ROLES, EventDraft, FaultContext, new_id
+from relax.utils.fault_events.models import MAX_UINT, ROLES, EventDraft, FaultContext, new_id, service_role
 from relax.utils.fault_events.source import FaultSource
 
 
@@ -136,6 +136,20 @@ def test_fault_source_accepts_underlying_string_without_enum_formatting():
     assert snapshot["roles"] is roles and snapshot["roles"][0] is Role.actor
     source.clear(Role.actor)
     assert source.get("actor") is None
+
+
+@pytest.mark.parametrize("formatted", [False, True])
+def test_service_role_rejects_non_enum_string_subclasses(formatted):
+    class PlainRole(str):
+        pass
+
+    class FormattedRole(str):
+        def __str__(self):
+            raise AssertionError("role formatting must not be invoked")
+
+    role = FormattedRole("actor") if formatted else PlainRole("actor")
+    with pytest.raises(ValueError, match="^INVALID_ROLE: role must be a supported service role$"):
+        service_role(role)
 
 
 @pytest.mark.parametrize("generation", [-1, MAX_UINT + 1, True, "0", {}, 1.5])

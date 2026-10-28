@@ -422,7 +422,7 @@ def test_recovery_dispatch_signals_only_after_work_finishes(role, global_restart
     ctrl._health_manager.increment_restart_count = Mock(return_value=1)
     ctrl._health_manager.mark_healthy = Mock()
 
-    def work():
+    def work(fault_observer=None):
         assert ctrl._restarting
         assert not ctrl._restart_done_event.is_set()
 
