@@ -108,7 +108,7 @@ def controller_fixture():
     cls = load_methods(
         "relax/core/controller.py",
         "Controller",
-        {"restart_serve", "training_loop", "_consume_restart_cycle", "_fault_call", "_start_fault_recovery"},
+        {"restart_serve", "training_loop", "_consume_restart_cycle"},
         ns,
     )
     ctrl = cls()

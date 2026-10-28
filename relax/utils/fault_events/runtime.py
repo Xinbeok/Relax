@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from relax.utils.logging_utils import get_logger
 
 from .context import FaultTraceContext, capture_trace_context, parse_trace_context
-from .models import MAX_UINT, REASONS, EventDraft, FaultContext, new_id, service_role, valid_uint
+from .models import MAX_UINT, REASONS, EventDraft, FaultContext, RecoveryEvidence, new_id, service_role, valid_uint
 from .store import FaultEventStore, _Record
 from .telemetry import OTelConfigError
 
@@ -76,11 +76,9 @@ class FaultEventRuntime:
         self.store = FaultEventStore(self.run_id, capacity)
         self.queue_capacity = queue_capacity
         self.query_server: FaultQueryServer | None = None
-        self._queue: deque[EventDraft] = deque()
+        self._queue: deque[tuple[EventDraft, FaultTraceContext | None]] = deque()
         self._pending: dict[str, EventDraft] = {}
-        self._pending_contexts: dict[str, FaultTraceContext | None] = {}
         self._admission_context: FaultTraceContext | None = None
-        self._inflight_context: FaultTraceContext | None = None
         self._log_exporter = log_exporter
         self._otel_startup_errors = 0
         self._otel_observer_errors = 0
@@ -477,6 +475,8 @@ class FaultEventRuntime:
     def start_recovery(self, role: str, mode: str, expected: int) -> Recovery | None:
         try:
             role = service_role(role)
+            if isinstance(expected, RecoveryEvidence):
+                expected = int(expected)
             if (
                 type(mode) is not str
                 or mode not in ("local", "global")
@@ -595,6 +595,10 @@ class FaultEventRuntime:
         if recovery is None:
             return
         try:
+            if isinstance(observed, RecoveryEvidence):
+                observed = int(observed)
+            if isinstance(failed, RecoveryEvidence):
+                failed = int(failed)
             if (
                 type(recovery) is not Recovery
                 or not valid_uint(observed, 63)
@@ -747,11 +751,9 @@ class FaultEventRuntime:
             return False
         self._pending[draft.event_id] = draft
         try:
-            self._pending_contexts[draft.event_id] = self._admission_context if capture else context
-            self._queue.append(draft)
+            self._queue.append((draft, self._admission_context if capture else context))
         except Exception:
             self._pending.pop(draft.event_id, None)
-            self._pending_contexts.pop(draft.event_id, None)
             raise
         self._wake.set()
         return True
@@ -909,7 +911,7 @@ class FaultEventRuntime:
             # itself fails. Keep the original Store; never replace its history.
             pass
 
-    def _submit(self, draft: EventDraft) -> None:
+    def _submit(self, draft: EventDraft, context: FaultTraceContext | None) -> None:
         for attempt in range(2):
             if self._stop.is_set():
                 self._settle_abandoned(draft)
@@ -942,9 +944,7 @@ class FaultEventRuntime:
             # commit. Its failures must never disable or invalidate the Store.
             if result == "accepted" and self._log_exporter is not None:
                 try:
-                    self._log_exporter.offer(
-                        record.draft.record(record.sequence, record.timestamp), self._inflight_context
-                    )
+                    self._log_exporter.offer(record.draft.record(record.sequence, record.timestamp), context)
                 except Exception:
                     self._otel_error()
             return
@@ -977,23 +977,21 @@ class FaultEventRuntime:
                 try:
                     if self._stop.is_set() or self._disabled.is_set():
                         return
-                    draft = self._queue.popleft() if self._queue else None
-                    self._inflight_context = self._pending_contexts.get(draft.event_id) if draft is not None else None
+                    entry = self._queue.popleft() if self._queue else None
                     if not self._queue:
                         self._wake.clear()
-                    self._inflight = int(draft is not None)
+                    self._inflight = int(entry is not None)
                 finally:
                     self._lock.release()
-                if draft is None:
+                if entry is None:
                     continue
+                draft, context = entry
                 try:
-                    self._submit(draft)
+                    self._submit(draft, context)
                 finally:
                     with self._lock:
                         self._inflight = 0
                         self._pending.pop(draft.event_id, None)
-                        self._pending_contexts.pop(draft.event_id, None)
-                        self._inflight_context = None
         except Exception:
             # An unexpected consumer failure cannot produce a successful empty
             # query. Disable its Store even when the last commit is uncertain.
@@ -1005,8 +1003,6 @@ class FaultEventRuntime:
                 remaining = tuple(self._queue)
                 self._queue.clear()
                 self._pending.clear()
-                self._pending_contexts.clear()
-                self._inflight_context = None
                 self._inflight = 0
                 for publication in self._publications.values():
                     self._retire_publication(publication)
@@ -1016,7 +1012,7 @@ class FaultEventRuntime:
                 if self._recoveries:
                     self.note_unknown("OUTCOME_UNOBSERVED")
                     self._recoveries.clear()
-            for draft in remaining:
+            for draft, _ in remaining:
                 self._settle_abandoned(draft)
 
     def close(self) -> None:

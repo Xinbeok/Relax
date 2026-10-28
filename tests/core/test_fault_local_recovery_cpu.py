@@ -19,8 +19,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from relax.utils.fault_events import models as fault_models
-from relax.utils.fault_events.models import FaultContext, new_id
+from relax.utils.fault_events.models import FaultContext, RecoveryEvidence, new_id
+from relax.utils.fault_events.recovery import expected_evidence
 from relax.utils.fault_events.runtime import FaultEventRuntime
 
 
@@ -49,8 +49,14 @@ def load_classes(path, names, namespace):
     tree = ast.parse((ROOT / path).read_text())
     selected = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
     module = ast.Module(body=ast.parse("from __future__ import annotations").body + selected, type_ignores=[])
-    evidence = {name: value for name, value in vars(fault_models).items() if "EVIDENCE" in name}
-    namespace = {"__name__": "fault_local_cpu", "Enum": Enum, "IntEnum": IntEnum, **evidence, **namespace}
+    namespace = {
+        "__name__": "fault_local_cpu",
+        "Enum": Enum,
+        "IntEnum": IntEnum,
+        "RecoveryEvidence": RecoveryEvidence,
+        "expected_evidence": expected_evidence,
+        **namespace,
+    }
     exec(compile(ast.fix_missing_locations(module), str(ROOT / path), "exec"), namespace)
     return namespace
 
@@ -255,22 +261,84 @@ def test_observer_and_its_log_failure_do_not_change_actual_service_restart():
     assert trace == baseline
 
 
-def test_controller_plan_failure_is_isolated_and_default_off_never_evaluates_plan(runtime):
-    for observer in (None, runtime):
-        trace = []
-        service = make_service(trace)
-        controller, _ = make_controller(observer, {Roles.advantages: service}, trace)
-        calls = []
+def test_default_off_never_evaluates_recovery_plan():
+    trace = []
+    service = make_service(trace)
+    controller, _ = make_controller(None, {Roles.advantages: service}, trace)
+    plan = Mock(side_effect=AssertionError("disabled observation must not evaluate a plan"))
+    type(controller)._restart_serve.__globals__["expected_evidence"] = plan
+    controller.restart_serve(Roles.advantages)
+    assert "submit_task" in trace and controller._restart_error is None
+    plan.assert_not_called()
 
-        def fail_plan(mode):
-            calls.append(mode)
-            raise RuntimeError("SENSITIVE_PLAN_ERROR")
 
-        controller._fault_plan = fail_plan
+@pytest.mark.parametrize(
+    "mode,roles,options,expected",
+    [
+        ("local", (), {}, 7),
+        ("global", (), {}, 5),
+        ("global", (Roles.actor_fwd, Roles.reference), {"fully_async": True}, 5),
+        ("global", (Roles.actor,), {}, 7),
+        ("global", (Roles.actor,), {"fully_async": True}, 15),
+        ("global", (Roles.actor, Roles.actor_fwd), {"fully_async": True}, 31),
+        ("global", (Roles.actor, Roles.reference), {"fully_async": True}, 47),
+        ("global", ("actor", "actor_fwd", "reference"), {"fully_async": True}, 63),
+        ("global", (Roles.actor,), {"fully_async": True, "hybrid": True}, 7),
+        ("global", (Roles.actor,), {"debug_train_only": True}, 5),
+        ("global", (Roles.actor,), {"debug_rollout_only": True}, 5),
+    ],
+)
+def test_recovery_plan_preserves_role_and_configuration_rules(mode, roles, options, expected):
+    config = SimpleNamespace(**options)
+    plan = expected_evidence(mode, config, dict.fromkeys(roles))
+    assert type(plan) is int and plan == expected
+
+
+def test_local_recovery_context_stays_owned_until_restart_is_complete_and_consumed(runtime):
+    observe(runtime)
+    trace = []
+    service = make_service(trace)
+    restart = service.restart
+    entered, release, second_started = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+
+    def blocked_restart(fault_observer=None):
+        calls.append(fault_observer)
+        entered.set()
+        assert release.wait(3)
+        restart(fault_observer=fault_observer)
+
+    service.restart = blocked_restart
+    controller, _ = make_controller(runtime, {Roles.advantages: service}, trace)
+    first = threading.Thread(target=controller.restart_serve, args=(Roles.advantages,))
+
+    def next_restart():
+        second_started.set()
         controller.restart_serve(Roles.advantages)
-        assert "submit_task" in trace and controller._restart_error is None
-        assert calls == ([] if observer is None else ["local"])
-    assert runtime.diagnostics()["coverage_unknown"]
+
+    second = threading.Thread(target=next_restart)
+    first.start()
+    assert entered.wait(3)
+    recovery = controller._fault_recovery
+    second.start()
+    try:
+        assert second_started.wait(3)
+        assert controller._fault_recovery is recovery and len(calls) == 1
+        release.set()
+        first.join(3)
+        assert not first.is_alive()
+        assert recovery.outcome == "recovery_succeeded"
+        assert controller._fault_recovery is recovery and len(calls) == 1
+        assert second.is_alive() and not controller._restart_consumed_event.is_set()
+        controller._consume_restart_cycle()
+        second.join(3)
+        assert not second.is_alive() and len(calls) == 2
+    finally:
+        release.set()
+        first.join(3)
+        controller._restart_consumed_event.set()
+        second.join(3)
+        assert not first.is_alive() and not second.is_alive()
 
 
 def test_local_completion_follows_all_original_controller_success_actions(runtime):

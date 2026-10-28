@@ -179,8 +179,8 @@ def test_runtime_pending_duplicates_merge_and_failure_settles_once(make_runtime,
         runtime._lock.release()
         return original_status(value)
 
-    def submit(value):
-        original_submit(value)
+    def submit(value, context):
+        original_submit(value, context)
         settled.set()
 
     monkeypatch.setattr(runtime.store, "_append_committed", append)
@@ -278,8 +278,8 @@ def test_runtime_retained_conflict_preserves_original_without_guessing_loss(make
     settled = threading.Event()
     original_submit = runtime._submit
 
-    def submit(value):
-        original_submit(value)
+    def submit(value, context):
+        original_submit(value, context)
         settled.set()
 
     monkeypatch.setattr(runtime, "_submit", submit)
@@ -302,8 +302,8 @@ def test_runtime_retained_duplicate_with_busy_append_is_not_lost(make_runtime, m
         calls.append(value)
         raise TimeoutError("BUSY")
 
-    def submit(value):
-        original_submit(value)
+    def submit(value, context):
+        original_submit(value, context)
         settled.set()
 
     monkeypatch.setattr(runtime.store, "_append_committed", append)
@@ -324,8 +324,8 @@ def test_runtime_unverifiable_abandonment_reports_unknown_instead_of_lost(make_r
     def busy(_draft):
         raise TimeoutError("BUSY")
 
-    def submit(value):
-        original_submit(value)
+    def submit(value, context):
+        original_submit(value, context)
         settled.set()
 
     monkeypatch.setattr(runtime.store, "_append_committed", busy)
@@ -356,8 +356,8 @@ def test_runtime_busy_retries_same_draft_once(make_runtime, monkeypatch, retry_s
             return original_append(value)
         raise TimeoutError("BUSY")
 
-    def submit(value):
-        original_submit(value)
+    def submit(value, context):
+        original_submit(value, context)
         settled.set()
 
     monkeypatch.setattr(runtime.store, "_append_committed", append)
@@ -387,8 +387,8 @@ def test_runtime_permanent_store_rejection_is_known_lost(make_runtime, monkeypat
         calls.append(draft)
         raise ValueError(code)
 
-    def submit(draft):
-        original_submit(draft)
+    def submit(draft, context):
+        original_submit(draft, context)
         settled.set()
 
     monkeypatch.setattr(runtime.store, "_append_committed", append)
@@ -615,7 +615,7 @@ def test_runtime_unexpected_consumer_failure_disables_store_and_settles_queue(ma
     runtime = make_runtime(queue_capacity=2)
     entered, release = threading.Event(), threading.Event()
 
-    def submit(_draft):
+    def submit(_draft, _context):
         entered.set()
         assert release.wait(3)
         raise OSError("consumer failure")

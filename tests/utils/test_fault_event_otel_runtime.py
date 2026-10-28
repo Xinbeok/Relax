@@ -3,13 +3,14 @@
 
 import threading
 import time
+from collections import deque
 
 import pytest
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 
 from relax.utils.fault_events.context import FaultTraceContext
-from relax.utils.fault_events.models import EventDraft
+from relax.utils.fault_events.models import EventDraft, RecoveryEvidence
 from relax.utils.fault_events.runtime import FaultEventRuntime, start_fault_events
 from relax.utils.fault_events.source import FaultSource
 from tests.utils.test_fault_event_otel_exporter import collector as _collector_fixture
@@ -112,9 +113,9 @@ def test_runtime_to_real_otlp_keeps_first_origin_and_deduplicates(collector, mon
         assert release.wait(3)
         return original_commit(value)
 
-    def submit(value):
+    def submit(value, context):
         with tracer.start_as_current_span("unrelated-consumer"):
-            original_submit(value)
+            original_submit(value, context)
         submissions.append(value.event_id)
         if len(submissions) == 2:
             completed.set()
@@ -194,22 +195,81 @@ def test_export_offer_exception_never_invalidates_a_definite_local_commit(make_r
     assert "PRIVATE_EXPORT_FAILURE" not in str(status)
 
 
-def test_context_admission_failure_releases_pending_identity(make_runtime):
-    class UnavailableContexts(dict):
-        def __setitem__(self, key, value):
-            raise MemoryError("context allocation unavailable")
+def test_queue_admission_failure_releases_pending_identity(make_runtime):
+    class UnavailableQueue(deque):
+        def append(self, value):
+            raise MemoryError("queue allocation unavailable")
 
     runtime = make_runtime(log_exporter=MemorySink())
-    runtime._pending_contexts = UnavailableContexts()
+    runtime._queue = UnavailableQueue()
     item = draft(runtime)
     assert runtime.record(item) is False
     assert not runtime._pending and not runtime._queue
-    runtime._pending_contexts = {}
+    runtime._queue = deque()
     assert runtime.record(item)
     wait_for(lambda: drained(runtime))
     assert runtime.query()["events"][0]["event_id"] == item.event_id
     assert runtime.diagnostics()["admission_rejections"] == 1
     assert runtime.diagnostics()["known_lost_events"] == 0
+
+
+def test_queued_duplicate_preserves_first_context_and_fifo(make_runtime, monkeypatch, tracer):
+    sink = MemorySink()
+    runtime = make_runtime(queue_capacity=1, log_exporter=sink)
+    entered, release = threading.Event(), threading.Event()
+    first, queued = draft(runtime), draft(runtime, 2)
+    original = runtime.store._append_committed
+
+    def append(value):
+        if value.event_id == first.event_id:
+            entered.set()
+            assert release.wait(3)
+        return original(value)
+
+    monkeypatch.setattr(runtime.store, "_append_committed", append)
+    try:
+        assert runtime.record(first)
+        assert entered.wait(3)
+        with tracer.start_as_current_span("queued-origin") as span:
+            origin = span.get_span_context()
+            assert runtime.record(queued)
+        with tracer.start_as_current_span("duplicate-origin"):
+            assert runtime.record(queued)
+        assert runtime.diagnostics()["queued"] == runtime.diagnostics()["inflight"] == 1
+    finally:
+        release.set()
+    wait_for(lambda: drained(runtime))
+    assert [record["event_id"] for record, _ in sink.records] == [first.event_id, queued.event_id]
+    assert sink.records[1][1] == FaultTraceContext(origin.trace_id, origin.span_id, int(origin.trace_flags))
+    assert not runtime._pending
+
+
+def test_recovery_flags_are_normalized_only_at_runtime_admission(make_runtime):
+    class OtherInt(int):
+        pass
+
+    sink = MemorySink()
+    runtime = make_runtime(log_exporter=sink)
+    generation, _ = runtime.bind_source()
+    source = FaultSource(generation)
+    source.error("advantages", "reported_error")
+    runtime.observe_snapshot(source.snapshot(["advantages"]))
+    for invalid in (True, OtherInt(7)):
+        assert runtime.start_recovery("advantages", "local", invalid) is None
+    recovery = runtime.start_recovery("advantages", "local", RecoveryEvidence.LOCAL)
+    assert recovery is not None and type(recovery.expected) is int
+    for invalid in (True, OtherInt(1)):
+        runtime.evidence(recovery, observed=invalid)
+        runtime.evidence(recovery, failed=invalid)
+        assert recovery.observed == recovery.failed == 0
+    runtime.evidence(recovery, observed=RecoveryEvidence.DEPLOYED | RecoveryEvidence.TASK_SUBMITTED)
+    runtime.evidence(recovery, failed=RecoveryEvidence.STEP_RESTORED)
+    wait_for(lambda: drained(runtime))
+    stored = runtime.query()["events"][-1]
+    assert stored["event_type"] == "recovery_failed"
+    assert [stored[name] for name in ("expected_evidence", "observed_evidence", "failed_evidence")] == [7, 5, 2]
+    for record in (stored, *(item for item, _ in sink.records)):
+        assert all(type(record[name]) is int for name in ("expected_evidence", "observed_evidence", "failed_evidence"))
 
 
 @pytest.mark.parametrize("endpoint", [None, "not-a-collector"])
@@ -273,7 +333,7 @@ def test_source_sidecar_uses_discovery_and_upgrade_origins_not_health_poller(mak
     assert sink.records[1][1] == FaultTraceContext(
         fatal_context.trace_id, fatal_context.span_id, int(fatal_context.trace_flags)
     )
-    assert not runtime._pending_contexts
+    assert not runtime._pending
 
 
 def test_malformed_sidecar_degrades_to_untraced_export_without_local_loss(make_runtime):

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from enum import IntFlag
 from types import MappingProxyType
 from uuid import uuid4
 
@@ -26,15 +27,20 @@ REASONS = MappingProxyType(
         "termination_requested": ("fatal_error", "restart_limit"),
     }
 )
-# Recovery evidence bits. Local recovery requires the first three; a global plan
-# adds the weight-sync bits only for the fully async roles it rebuilds.
-EVIDENCE_DEPLOYED = 1
-EVIDENCE_STEP_RESTORED = 2
-EVIDENCE_TASK_SUBMITTED = 4
-EVIDENCE_ACTOR_WEIGHT_SENT = 8
-EVIDENCE_ACTOR_FWD_WEIGHT_RECEIVED = 16
-EVIDENCE_REFERENCE_WEIGHT_RECEIVED = 32
-LOCAL_RECOVERY_EVIDENCE = EVIDENCE_DEPLOYED | EVIDENCE_STEP_RESTORED | EVIDENCE_TASK_SUBMITTED
+
+
+class RecoveryEvidence(IntFlag):
+    """Recovery operations; runtime admission converts flags to schema ints."""
+
+    DEPLOYED = 1
+    STEP_RESTORED = 2
+    TASK_SUBMITTED = 4
+    ACTOR_WEIGHT_SENT = 8
+    ACTOR_FWD_WEIGHT_RECEIVED = 16
+    REFERENCE_WEIGHT_RECEIVED = 32
+    LOCAL = DEPLOYED | STEP_RESTORED | TASK_SUBMITTED
+
+
 _ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 _REQUIRED_FIELDS = frozenset(("run_id", "fault_id", "event_id", "role", "source_generation", "event_type"))
 _DRAFT_FIELDS = _REQUIRED_FIELDS | {
@@ -67,7 +73,9 @@ def service_role(value: object) -> str:
     """Return the plain role string, accepting registry ``StrEnum`` members."""
     if not isinstance(value, str):
         raise ValueError("INVALID_ROLE: role must be a string")
-    # Read the underlying string without invoking a subclass's __str__.
+    # A plain str/Enum on Python 3.10 formats as "Roles.actor"; the registry's
+    # compatibility StrEnum overrides __str__, as other subclasses may too.
+    # Read the underlying string directly without invoking those overrides.
     value = str.__str__(value)
     if len(value) > 10 or value not in ROLES:
         raise ValueError("INVALID_ROLE: role must be a supported service role")
